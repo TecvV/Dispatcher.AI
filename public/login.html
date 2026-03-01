@@ -1,0 +1,74 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Dispatcher.AI Login</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Inter:wght@600;700;800&family=Manrope:wght@400;500;700;800&display=swap"
+      rel="stylesheet"
+    />
+    <link rel="stylesheet" href="/ui.css" />
+  </head>
+  <body class="login-page">
+    <main class="login-split">
+      <section class="login-left">
+        <div class="login-brand-block">
+          <div class="hero-logo" aria-label="Dispatcher.AI">Dispatcher.AI</div>
+          <p class="muted login-tagline">Coordinate support, communication, and escalation from one command center.</p>
+        </div>
+      </section>
+      <section class="login-right">
+        <section class="auth-card panel">
+          <h1>Welcome</h1>
+          <p class="muted">Login or create your account to access all pages.</p>
+          <div class="tabs">
+            <button id="tabLogin" class="tab active">Login</button>
+            <button id="tabSignup" class="tab ghost">Sign Up</button>
+          </div>
+          <div id="nameWrap" class="stack" style="display: none">
+            <label>Name (asked only once)</label>
+            <input id="name" placeholder="Your name" />
+          </div>
+          <div class="stack">
+            <label>Email</label>
+            <input id="email" type="email" placeholder="name@example.com" />
+            <label>Password</label>
+            <div class="password-field-wrap">
+              <input id="password" type="password" placeholder="Minimum 8 characters" />
+              <button
+                id="toggleLoginPassword"
+                class="password-visibility-btn"
+                type="button"
+                aria-label="Show password"
+                aria-pressed="false"
+                title="Show password"
+              >
+                👁
+              </button>
+            </div>
+            <div class="row" style="justify-content: flex-end; margin-top: 6px">
+              <button id="forgotPasswordBtn" class="ghost" type="button">Forgot Password?</button>
+            </div>
+          </div>
+          <div class="row" style="margin-top: 12px">
+            <button id="submitBtn">Login</button>
+          </div>
+          <div class="row" style="margin-top: 10px">
+            <button id="googleLoginBtn" class="ghost" type="button">Login with Google</button>
+            <button id="googleSignupBtn" class="ghost" type="button">Sign Up with Google</button>
+          </div>
+          <section id="liveStatusBox" class="live-status">
+            <p data-live-main>Enter details to login or sign up.</p>
+            <p data-live-sub class="muted">Checking live website status...</p>
+          </section>
+        </section>
+      </section>
+    </main>
+    <script type="module" src="/status-widget.js"></script>
+    <script type="module" src="/login.js"></script>
+  </body>
+</html>
+

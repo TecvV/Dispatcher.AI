@@ -1,0 +1,191 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Dispatcher.AI Escalation Hub</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;700;800&display=swap" rel="stylesheet" />
+    <link rel="stylesheet" href="/ui.css" />
+  </head>
+  <body>
+    <div class="radar-pulse-stage" aria-hidden="true">
+      <div class="radar-pulse-ring ring-a"></div>
+      <div class="radar-pulse-ring ring-b"></div>
+    </div>
+    <main class="shell">
+      <nav class="site-nav">
+        <div class="site-brand">Dispatcher.AI</div>
+        <div class="site-links">
+          <a class="site-link" href="/dashboard">Dashboard</a>
+          <a class="site-link" href="/chat">Companion Chat</a>
+          <a class="site-link active" href="/escalation">Escalation Hub</a>
+          <button id="changePasswordBtn" class="site-link">Change Password</button>
+          <button id="logoutBtn" class="site-link">Logout</button>
+        </div>
+      </nav>
+      <header class="top">
+        <div>
+          <h1>Human Escalation Hub</h1>
+          <p class="muted">Dedicated page for Listener discovery, booking, private sessions, and privacy-safe lifecycle.</p>
+        </div>
+        <div class="row">
+          <button id="openHubSnapshotBtn" class="ghost" type="button">Hub Snapshot</button>
+          <button id="openSessionVisualsBtn" class="ghost" type="button">Session Visuals</button>
+        </div>
+      </header>
+
+      <section class="layout">
+        <section class="panel stack">
+          <h2>Listener Profile</h2>
+          <p id="profileHintText" class="muted">Apply once, then toggle your live listening availability.</p>
+          <textarea
+            id="interestsInput"
+            rows="2"
+            placeholder="Interests (comma separated, e.g., anxiety, work stress, grief)"
+          ></textarea>
+          <textarea id="answersInput" rows="4" placeholder="Qualification answers (one per line)"></textarea>
+          <div class="row">
+            <button id="applyListenerBtn">Apply As Listener</button>
+            <button id="editProfileBtn" class="ghost" style="display: none">Edit Profile</button>
+            <button id="viewPerformanceBtn" class="ghost" style="display: none">Performance Insights</button>
+          </div>
+          <div id="myProfileBox" class="panel-soft">
+            <h3>My Listener Profile</h3>
+            <p id="myProfileText" class="muted">Not registered yet.</p>
+          </div>
+          <div id="walletBox" class="panel-soft">
+            <h3>My Mock Wallet</h3>
+            <p id="walletText" class="muted">Balance: Rs 0</p>
+            <div class="row">
+              <input id="walletTopupInput" type="number" min="1" step="1" placeholder="Add test funds (INR)" />
+              <button id="walletTopupBtn" class="ghost">Add Funds</button>
+            </div>
+          </div>
+
+          <h2>Open Listening Slot</h2>
+          <p class="muted">Listeners can publish future slots. All users can view and book open slots.</p>
+          <div class="grid-2">
+            <input id="slotDate" type="date" />
+            <input id="slotTime" type="time" />
+          </div>
+          <input id="slotFeeInr" type="number" min="0" step="1" placeholder="Session charge (INR). Use 0 for free slot." />
+          <div class="row">
+            <div class="hold-exec-wrap" data-hold-exec-wrap>
+              <svg class="hold-exec-ring" viewBox="0 0 64 64" aria-hidden="true">
+                <circle class="hold-exec-track" cx="32" cy="32" r="28"></circle>
+                <circle class="hold-exec-progress" cx="32" cy="32" r="28"></circle>
+              </svg>
+              <button id="openSlotBtn" data-hold-exec="open-slot">Open Slot</button>
+            </div>
+          </div>
+          <h3>Listening Session Slots released by you, yet to be booked by anyone</h3>
+          <div id="myOpenSlotsBox" class="contacts"></div>
+
+          <h3>Upcoming Listening Sessions (You as the Listener)</h3>
+          <div id="incomingBookingsBox" class="contacts"></div>
+
+          <h3>Upcoming Speaking Sessions booked by you (You as a Speaker)</h3>
+          <div id="outgoingBookingsBox" class="contacts"></div>
+
+          <h2>Private Session Chat</h2>
+          <p class="muted">Chat mode activates at scheduled time and ends after 1 minute.</p>
+          <select id="chatBookingSelect"></select>
+          <div id="chatSessionStatus" class="muted">No chat booking selected.</div>
+          <div id="meetSessionStatus" class="muted">No active Google Meet session.</div>
+          <div id="chatMessagesBox" class="chat-window"></div>
+          <textarea id="chatMessageInput" rows="3" placeholder="Type chat message..."></textarea>
+          <div class="row">
+            <button id="sendChatMessageBtn">Send Message</button>
+            <button id="purgeChatBtn" class="ghost">Purge Chat Now (Speaker Only)</button>
+          </div>
+        </section>
+
+        <aside class="panel stack">
+          <h2>Available Listener Slots</h2>
+          <div id="listenerMarketplaceBox" class="contacts"></div>
+
+          <h3>Your Speaking Sessions</h3>
+          <div id="speakingSessionsBox" class="contacts"></div>
+
+          <h3>Your Listening Sessions</h3>
+          <div id="listeningSessionsBox" class="contacts"></div>
+
+          <h3>Wellness Log (AI Takeaways)</h3>
+          <div id="wellnessLogsBox" class="contacts"></div>
+        </aside>
+      </section>
+
+      <section id="liveStatusBox" class="live-status">
+        <p data-live-main>Escalation Hub ready.</p>
+        <p data-live-sub class="muted">Monitoring page status...</p>
+      </section>
+    </main>
+
+    <dialog id="listenerDetailDialog" class="panel">
+      <button id="closeListenerDetailX" class="dialog-close" aria-label="Close dialog" type="button">×</button>
+      <h3>Listener Details</h3>
+      <div id="listenerDetailContent" class="stack"></div>
+    </dialog>
+
+    <dialog id="ratingDialog" class="panel">
+      <button id="closeRatingDialogX" class="dialog-close" aria-label="Close dialog" type="button">×</button>
+      <h3>Rate Listener Session (Mandatory)</h3>
+      <p class="muted">Please rate all parameters (0-10) to complete this session.</p>
+      <div id="ratingDialogContext" class="muted"></div>
+      <div class="grid-2">
+        <input id="rateEmpathy" type="number" min="0" max="10" step="0.1" placeholder="Empathy" />
+        <input id="ratePoliteness" type="number" min="0" max="10" step="0.1" placeholder="Politeness" />
+        <input id="ratePatience" type="number" min="0" max="10" step="0.1" placeholder="Patience" />
+        <input id="rateEngagement" type="number" min="0" max="10" step="0.1" placeholder="Interest/Engagement" />
+        <input id="rateConnection" type="number" min="0" max="10" step="0.1" placeholder="Connection quality" />
+        <input id="rateTipsQuality" type="number" min="0" max="10" step="0.1" placeholder="Tips quality" />
+      </div>
+      <textarea id="ratingNotes" rows="2" placeholder="Optional speaker notes"></textarea>
+      <div class="row">
+        <button id="submitRatingBtn">Submit Session Rating</button>
+      </div>
+    </dialog>
+
+    <dialog id="profileDialog" class="panel">
+      <button id="closeProfileDialogX" class="dialog-close" aria-label="Close dialog" type="button">×</button>
+      <h3>Edit Listener Profile</h3>
+      <p class="muted">Update once. These values will be used for all future slots.</p>
+      <textarea
+        id="profileDialogInterests"
+        rows="2"
+        placeholder="Interests (comma separated, e.g., anxiety, work stress, grief)"
+      ></textarea>
+      <textarea id="profileDialogAnswers" rows="4" placeholder="Qualification answers (one per line)"></textarea>
+      <div class="row">
+        <button id="saveProfileBtn">Save Profile</button>
+      </div>
+    </dialog>
+
+    <dialog id="performanceDialog" class="panel">
+      <button id="closePerformanceDialogX" class="dialog-close" aria-label="Close dialog" type="button">×</button>
+      <h3>Listener Performance Insights</h3>
+      <p class="muted">Session-wise trend of your ratings as a Listener.</p>
+      <div id="performanceDialogContent" class="stack"></div>
+    </dialog>
+
+    <dialog id="hubSnapshotDialog" class="panel">
+      <button id="closeHubSnapshotDialogX" class="dialog-close" aria-label="Close dialog" type="button">×</button>
+      <h3>Escalation Hub Snapshot</h3>
+      <p class="muted">Live operational summary of your listener and speaker activity.</p>
+      <div id="hubSnapshotContent" class="stack"></div>
+    </dialog>
+
+    <dialog id="sessionVisualsDialog" class="panel">
+      <button id="closeSessionVisualsDialogX" class="dialog-close" aria-label="Close dialog" type="button">×</button>
+      <h3>Session Visuals</h3>
+      <p class="muted">Visual split of booking outcomes and mode usage.</p>
+      <div id="sessionVisualsContent" class="stack"></div>
+    </dialog>
+
+    <script type="module" src="/status-widget.js"></script>
+    <script type="module" src="/escalation.js"></script>
+  </body>
+  </html>
+

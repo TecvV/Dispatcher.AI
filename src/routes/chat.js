@@ -1,0 +1,2738 @@
+import { Router } from "express";
+import { ConversationMemory } from "../models/ConversationMemory.js";
+import { Contact } from "../models/Contact.js";
+import { DiscordChannel } from "../models/DiscordChannel.js";
+import { User } from "../models/User.js";
+import { CheckInTask } from "../models/CheckInTask.js";
+import { CarePackage } from "../models/CarePackage.js";
+import { InsightReport } from "../models/InsightReport.js";
+import { MoodReport } from "../models/MoodReport.js";
+import { CrisisEvent } from "../models/CrisisEvent.js";
+import { ListenerMatch } from "../models/ListenerMatch.js";
+import { requireAuth } from "../middleware/auth.js";
+import { maybeScheduleCheckIn } from "../services/checkinService.js";
+import { upsertDailyCarePackage } from "../services/carePackageService.js";
+import { matchListener } from "../services/listenerService.js";
+import {
+  classifyDirectoryRequest,
+  classifyDirectoryRequestSecondary,
+  classifyRoutingIntent,
+  classifyConversationTurn,
+  classifyPendingWorkflowControl,
+  assessDirectMessageSufficiency,
+  countDoctorMeetRequests,
+  extractRelayMessage,
+  generateContactEmailDraft,
+  generateVoiceCallScript,
+  inferOperationalMode,
+  planOperationalRequest,
+  resolveDataQuery,
+  resolveTargetAndMessage,
+  rewriteDispatchMessage,
+  updateDiscordDraftState,
+  updateTelegramDraftState
+} from "../services/llm.js";
+import { handlePotentialCrisis } from "../services/crisisService.js";
+import { createGoogleMeetAfterDays, createGoogleMeetAtDateTime } from "../services/calendarService.js";
+import { sendGmailMessage } from "../services/gmailService.js";
+import { extractExactDateTime, meetClarificationPrompt } from "../services/meetIntentService.js";
+import { MeetProposal } from "../models/MeetProposal.js";
+import { generateReportsForUser } from "../services/reportService.js";
+import { getValidGoogleAccessToken } from "../services/googleTokenService.js";
+import { runSupportGraph } from "../services/langgraphAgent.js";
+import { relayToContact, sendTelegramMessage } from "../services/telegramService.js";
+import { sendDiscordMessage } from "../services/discordService.js";
+import { clearMem0UserMemory } from "../services/mem0Service.js";
+import { VoiceRelayCall } from "../models/VoiceRelayCall.js";
+import { createVoiceRelayToken, startTwilioVoiceCall } from "../services/voiceCallService.js";
+
+const router = Router();
+router.use(requireAuth);
+
+router.get("/history", async (req, res, next) => {
+  try {
+    const latest = await ConversationMemory.find({ userId: req.user._id })
+      .sort({ createdAt: -1 })
+      .limit(1000)
+      .lean();
+    res.json(latest.reverse());
+  } catch (err) {
+    next(err);
+  }
+});
+
+router.delete("/history/all", async (req, res, next) => {
+  try {
+    const userId = req.user._id;
+    const [
+      memoriesResult,
+      checkinsResult,
+      carePackagesResult,
+      insightReportsResult,
+      moodReportsResult,
+      crisisEventsResult,
+      meetProposalsResult,
+      listenerMatchesResult
+    ] = await Promise.all([
+      ConversationMemory.deleteMany({ userId }),
+      CheckInTask.deleteMany({ userId }),
+      CarePackage.deleteMany({ userId }),
+      InsightReport.deleteMany({ userId }),
+      MoodReport.deleteMany({ userId }),
+      CrisisEvent.deleteMany({ userId }),
+      MeetProposal.deleteMany({ userId }),
+      ListenerMatch.deleteMany({ userId })
+    ]);
+
+    await User.findByIdAndUpdate(userId, {
+      $set: {
+        telegramDraftState: {
+          active: false,
+          contactId: null,
+          details: {
+            purpose: "",
+            date: "",
+            time: "",
+            location: "",
+            contactFullName: "",
+            invitees: "",
+            notes: ""
+          },
+          lastUpdatedAt: new Date()
+        },
+        discordDraftState: {
+          active: false,
+          channelId: null,
+          details: {
+            purpose: "",
+            date: "",
+            time: "",
+            location: "",
+            contactFullName: "",
+            invitees: "",
+            notes: ""
+          },
+          lastUpdatedAt: new Date()
+        },
+        voiceCallDraftState: {
+          active: false,
+          contactId: null,
+          lastUpdatedAt: new Date()
+        },
+        emailDraftState: {
+          active: false,
+          mode: "general_mail",
+          contactIds: [],
+          lastUpdatedAt: new Date()
+        },
+        crisisGuard: {
+          awaitingConfirmation: false,
+          askedAt: null,
+          triggerText: "",
+          contactId: null
+        },
+        notifications: []
+      }
+    });
+
+    const mem0Result = await clearMem0UserMemory({ userId });
+
+    res.json({
+      ok: true,
+      deleted: {
+        conversationMemories: memoriesResult.deletedCount || 0,
+        checkInTasks: checkinsResult.deletedCount || 0,
+        carePackages: carePackagesResult.deletedCount || 0,
+        insightReports: insightReportsResult.deletedCount || 0,
+        moodReports: moodReportsResult.deletedCount || 0,
+        crisisEvents: crisisEventsResult.deletedCount || 0,
+        meetProposals: meetProposalsResult.deletedCount || 0,
+        listenerMatches: listenerMatchesResult.deletedCount || 0,
+        mem0Cleared: Boolean(mem0Result?.ok)
+      },
+      mem0: mem0Result
+    });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// ROUTER REWRITTEN
+
+router.post("/message", async (req, res, next) => {
+  try {
+    const userId = req.user._id;
+    const { message, actionChoice, clientTimezone } = req.body;
+    if (!message) return res.status(400).json({ error: "message is required" });
+    const explicitChoice = String(actionChoice || "").trim();
+    const isStrictServiceModeTurn = Boolean(explicitChoice && explicitChoice !== "support_chat");
+    const isModeLockedService = isStrictServiceModeTurn;
+
+    const user = await User.findById(userId);
+    const effectiveTimezone = clientTimezone || user.timezone || "UTC";
+    const contacts = await Contact.find({ userId }).sort({ createdAt: -1 }).limit(20);
+    const discordChannels = await DiscordChannel.find({ userId }).sort({ createdAt: -1 }).limit(30);
+    const professional = null;
+    const selectedContactId = req.body.selectedContactId || "";
+    const selectedContact = selectedContactId
+      ? contacts.find((c) => String(c._id) === String(selectedContactId))
+      : null;
+
+    const recentForIntent = isStrictServiceModeTurn
+      ? []
+      : await ConversationMemory.find({
+          userId,
+          $or: [{ mode: "companion" }, { mode: { $exists: false } }]
+        })
+          .sort({ createdAt: -1 })
+          .limit(12)
+          .lean();
+    const recentChrono = [...recentForIntent].reverse();
+    const recentContextText = recentChrono
+      .map((m) => `${m.role}: ${m.text}`)
+      .join("\n")
+      .slice(0, 2200);
+
+    // ── STEP 1: Primary routing — this is the authoritative intent decision ──
+    // Run this FIRST so we can use it as a gate for all downstream classifiers.
+    const routing = await classifyRoutingIntent({
+      message,
+      recentContext: recentContextText
+    });
+
+    // ── INTENT RESOLUTION — Clean Architecture ───────────────────────────────
+    // DB draft states serve ONE purpose: "is the user answering a clarification?"
+    // They do NOT drive intent. Intent comes from current-turn LLM signals only.
+    //
+    // pendingMultiActionState: we asked "What message to send?" — user is replying.
+    // emailDraftState.active / telegramDraftState.active: we asked "Which contact?"
+    // googleMeetDraftState.active: we asked "Who?" or "What date/time?"
+    //
+    // A message is a "clarification answer" when routing returns support_chat
+    // AND there is an active pending state from last turn.
+    // In ALL other cases, intent is driven purely by routing + planOperationalRequest.
+
+    const pendingMulti = user.pendingMultiActionState?.active
+      ? user.pendingMultiActionState
+      : null;
+
+    // Is the user currently answering a clarification from last turn?
+    const hasPendingClarification =
+      pendingMulti !== null ||
+      Boolean(user.emailDraftState?.active) ||
+      Boolean(user.telegramDraftState?.active) ||
+      Boolean(user.discordDraftState?.active) ||
+      Boolean(user.voiceCallDraftState?.active) ||
+      Boolean(user.googleMeetDraftState?.active);
+
+    const activePendingActions = user.pendingMultiActionState?.active
+      ? Array.isArray(user.pendingMultiActionState.actions)
+        ? user.pendingMultiActionState.actions
+        : []
+      : [];
+    const pendingActionsForTurn = [
+      ...activePendingActions,
+      ...(user.emailDraftState?.active
+        ? [user.emailDraftState?.mode === "physical_mail" ? "physical_mail" : "general_mail"]
+        : []),
+      ...(user.telegramDraftState?.active ? ["telegram_message"] : []),
+      ...(user.discordDraftState?.active ? ["discord_message"] : []),
+      ...(user.voiceCallDraftState?.active ? ["voice_call"] : []),
+      ...(user.googleMeetDraftState?.active ? ["google_meet"] : [])
+    ];
+    const turnSemantics = await classifyConversationTurn({
+      message,
+      recentContext: recentContextText,
+      hasPendingClarification,
+      pendingActions: pendingActionsForTurn
+    });
+    const turnKind = String(turnSemantics?.kind || "").toLowerCase();
+    const isGenuineChat = turnKind === "general_chat";
+    const isOperationalContinuationTurn =
+      hasPendingClarification &&
+      turnKind === "workflow_continuation" &&
+      Boolean(
+        user.emailDraftState?.active ||
+          user.telegramDraftState?.active ||
+          user.discordDraftState?.active ||
+          user.voiceCallDraftState?.active ||
+          user.googleMeetDraftState?.active ||
+          pendingMulti
+      );
+
+    // Continuation: routing says support_chat but we have a pending clarification
+    // and the message looks like an answer (not a greeting/question).
+    const isClarificationAnswer =
+      hasPendingClarification &&
+      (turnKind === "workflow_continuation" ||
+        (routing.intent === "support_chat" && !isGenuineChat && turnKind !== "cancel"));
+    let pendingWorkflowCancelled = false;
+    let pendingWorkflowCancelReply = "";
+    if (hasPendingClarification && routing.intent === "support_chat") {
+      const control = await classifyPendingWorkflowControl({
+        message,
+        recentContext: recentContextText
+      });
+      const sufficiencyForPending = await assessDirectMessageSufficiency({
+        platform: "workflow",
+        message,
+        recentContext: recentContextText
+      });
+      const explicitCancel = turnKind === "cancel";
+      const classifierCancelWithoutContent =
+        control?.action === "cancel" && !Boolean(sufficiencyForPending?.sufficient);
+      if (explicitCancel || classifierCancelWithoutContent) {
+        await User.findByIdAndUpdate(userId, {
+          $set: {
+            "emailDraftState.active": false,
+            "emailDraftState.contactIds": [],
+            "telegramDraftState.active": false,
+            "telegramDraftState.contactId": null,
+            "discordDraftState.active": false,
+            "discordDraftState.channelId": null,
+            "voiceCallDraftState.active": false,
+            "voiceCallDraftState.contactId": null,
+            "googleMeetDraftState.active": false,
+            "googleMeetDraftState.wantsAll": false,
+            "googleMeetDraftState.pendingContactIds": [],
+            "googleMeetDraftState.stage": null,
+            "pendingMultiActionState.active": false,
+            "pendingMultiActionState.actions": [],
+            "pendingMultiActionState.targetScope": null,
+            "pendingMultiActionState.contactIds": [],
+            "pendingMultiActionState.channelIds": []
+          }
+        });
+        pendingWorkflowCancelled = true;
+        pendingWorkflowCancelReply = "Okay, I paused that request. We can continue anytime when you’re ready.";
+      }
+    }
+
+    // If it's a genuine chat message with pending state → clear all pending state.
+    if (isGenuineChat && hasPendingClarification) {
+      await User.findByIdAndUpdate(userId, {
+        $set: {
+          "emailDraftState.active": false,
+          "emailDraftState.contactIds": [],
+          "telegramDraftState.active": false,
+          "telegramDraftState.contactId": null,
+          "discordDraftState.active": false,
+          "discordDraftState.channelId": null,
+          "voiceCallDraftState.active": false,
+          "voiceCallDraftState.contactId": null,
+          "googleMeetDraftState.active": false,
+          "googleMeetDraftState.pendingContactIds": [],
+          "pendingMultiActionState.active": false,
+          "pendingMultiActionState.actions": []
+        }
+      });
+    }
+
+    // forcedIntent: from explicit UI choice, OR from pending clarification context.
+    // pendingMulti with multiple actions → multi_action.
+    // Single pending draft state → that draft's intent.
+    // Fresh operational message → empty (routing drives it).
+    let forcedIntent = "";
+    if (pendingWorkflowCancelled) {
+      forcedIntent = "";
+    } else if (explicitChoice) {
+      forcedIntent =
+        explicitChoice === "general_mail" || explicitChoice === "physical_mail"
+          ? explicitChoice
+          : explicitChoice === "support_chat" ? "support_chat"
+          : explicitChoice === "telegram_message" ? "telegram_message"
+          : explicitChoice === "discord_message" ? "discord_message"
+          : explicitChoice === "voice_call" ? "voice_call"
+          : explicitChoice === "google_meet" ? "google_meet"
+          : explicitChoice === "relay_message" ? "relay_message"
+          : "";
+    } else if (isClarificationAnswer) {
+      // Derive forcedIntent from what's pending
+      if (pendingMulti) {
+        forcedIntent = pendingMulti.actions.length > 1 ? "multi_action" : (pendingMulti.actions[0] || "");
+      } else if (user.googleMeetDraftState?.active) {
+        forcedIntent = "google_meet";
+      } else if (user.telegramDraftState?.active && user.emailDraftState?.active) {
+        forcedIntent = "multi_action";
+      } else if (user.telegramDraftState?.active) {
+        forcedIntent = "telegram_message";
+      } else if (user.discordDraftState?.active) {
+        forcedIntent = "discord_message";
+      } else if (user.voiceCallDraftState?.active) {
+        forcedIntent = "voice_call";
+      } else if (user.emailDraftState?.active) {
+        forcedIntent = user.emailDraftState?.mode === "physical_mail" ? "physical_mail" : "general_mail";
+      }
+    }
+    // For fresh operational messages: forcedIntent stays "" — routing drives resolvedIntent.
+
+    // activeDraftModes: only used for isMultiActionRequest detection.
+    // Derived from forcedIntent, not from raw DB state.
+    let activeDraftModes =
+      forcedIntent === "multi_action"
+        ? (pendingMulti?.actions || [])
+        : forcedIntent
+        ? [forcedIntent]
+        : [];
+
+    // ── STEP 2: Support-chat gate (computed AFTER semantic planners run) ──
+    // Initialize false here; we finalize it once semantic planners return.
+    let isClearlySupportChat = false;
+
+    // ── STEP 3: Secondary classifiers — ONLY run when NOT clearly support_chat ──
+    // This is the critical fix: we don't even call planOperationalRequest or
+    // resolveTargetAndMessage for obvious support_chat messages like "hi".
+    let resolution = {
+      resolvedContactIds: [],
+      resolvedChannelIds: [],
+      requestedContactRoles: [],
+      actualMessageToSend: null,
+      directoryAction: "none",
+      includeTelegramChatIds: false,
+      includeDiscordWebhooks: false
+    };
+    let operationalPlan = { actions: [], target_scope: "unknown", message_payload: "" };
+    let dataQueryPlan = { action: "none", resolvedContactIds: [], resolvedChannelIds: [], role: "none" };
+    let actionFallback = { mode: "none", confidence: 0 };
+
+    // Run all semantic classifiers in parallel for every turn.
+    // Routing must be semantic-first; no lexical short-circuiting.
+    [resolution, operationalPlan, dataQueryPlan, actionFallback] = await Promise.all([
+      resolveTargetAndMessage({ message, memoryMessages: recentChrono, contacts, channels: discordChannels }),
+      planOperationalRequest({ message, recentContext: recentContextText }),
+      resolveDataQuery({ message, memoryMessages: recentChrono, contacts, channels: discordChannels }),
+      inferOperationalMode({ message, recentContext: recentContextText })
+    ]);
+
+    // ── STEP 4: Resolve contacts/channels from resolution ──
+    const resolvedContactIdSet = new Set((resolution.resolvedContactIds || []).map((x) => String(x)));
+    const resolvedChannelIdSet = new Set((resolution.resolvedChannelIds || []).map((x) => String(x)));
+    let resolvedContactTargets = contacts.filter((c) => resolvedContactIdSet.has(String(c._id)));
+    let resolvedDiscordTargets = discordChannels.filter((c) => resolvedChannelIdSet.has(String(c._id)));
+    const requestedRoles = Array.isArray(resolution.requestedContactRoles)
+      ? resolution.requestedContactRoles.map((x) => String(x || "").toLowerCase()).filter(Boolean)
+      : [];
+    const resolvedMessagePayload =
+      typeof resolution.actualMessageToSend === "string" ? resolution.actualMessageToSend.trim() : null;
+    let semanticDraftInput = resolvedMessagePayload ?? "";
+
+    const normalizeText = (value) =>
+      String(value || "")
+        .toLowerCase()
+        .replace(/[^a-z0-9\s]/g, " ")
+        .replace(/\s+/g, " ")
+        .trim();
+    const normalizedUserMessage = normalizeText(message);
+    const normalizedPayload = normalizeText(semanticDraftInput);
+    const normalizedContactNames = contacts.map((c) => normalizeText(c.name)).filter(Boolean);
+    const normalizedChannelNames = discordChannels.map((c) => normalizeText(c.name)).filter(Boolean);
+    const isTargetOnlySelection =
+      Boolean(normalizedPayload) &&
+      normalizedPayload === normalizedUserMessage &&
+      (normalizedContactNames.includes(normalizedPayload) || normalizedChannelNames.includes(normalizedPayload));
+    if (isTargetOnlySelection) {
+      semanticDraftInput = "";
+    }
+
+    if (!semanticDraftInput && String(operationalPlan?.message_payload || "").trim()) {
+      semanticDraftInput = String(operationalPlan.message_payload).trim();
+    }
+    if (operationalPlan?.target_scope === "all_contacts") {
+      resolvedContactTargets = contacts.slice();
+    } else if (operationalPlan?.target_scope === "all_channels") {
+      resolvedDiscordTargets = discordChannels.slice();
+    }
+
+    // ── STEP 5: Directory request (contacts/channels list) ──
+    const directoryRequest = {
+      action: String(resolution.directoryAction || "none"),
+      include_telegram_chat_ids: Boolean(resolution.includeTelegramChatIds),
+      include_discord_webhooks: Boolean(resolution.includeDiscordWebhooks)
+    };
+    if (directoryRequest.action === "none" && String(dataQueryPlan?.action || "none") === "none") {
+      const primaryDirectory = await classifyDirectoryRequest({ message, recentContext: recentContextText });
+      if (primaryDirectory?.action && primaryDirectory.action !== "none") {
+        directoryRequest.action = String(primaryDirectory.action);
+        directoryRequest.include_telegram_chat_ids = Boolean(primaryDirectory.include_telegram_chat_ids);
+        directoryRequest.include_discord_webhooks = Boolean(primaryDirectory.include_discord_webhooks);
+      } else {
+        const secondaryDirectory = await classifyDirectoryRequestSecondary({
+          message,
+          recentContext: recentContextText
+        });
+        if (secondaryDirectory?.action && secondaryDirectory.action !== "none") {
+          directoryRequest.action = String(secondaryDirectory.action);
+        }
+      }
+    }
+
+    // Continuation priority guard:
+    // when user is answering an active operational workflow question,
+    // do not allow directory/data-query routing to hijack the turn.
+    if (isOperationalContinuationTurn) {
+      dataQueryPlan = {
+        action: "none",
+        resolvedContactIds: [],
+        resolvedChannelIds: [],
+        role: "none"
+      };
+      directoryRequest.action = "none";
+      directoryRequest.include_telegram_chat_ids = false;
+      directoryRequest.include_discord_webhooks = false;
+    }
+
+    // ── STEP 6: Determine final resolved intent ──
+    // Early detection of multi-action requests (e.g. "send email AND telegram to all contacts").
+    // planOperationalRequest returns multiple actions in this case. We detect it here so that
+    // BOTH draft blocks (email + telegram) fire independently instead of collapsing to one.
+    let plannedActionsEarly = Array.isArray(operationalPlan?.actions)
+      ? operationalPlan.actions.filter((x) =>
+          ["general_mail", "physical_mail", "telegram_message", "discord_message", "voice_call", "google_meet"].includes(String(x))
+        )
+      : [];
+    const serviceModeLabelByAction = {
+      general_mail: "Email Mode",
+      physical_mail: "Email Mode",
+      telegram_message: "Telegram Mode",
+      discord_message: "Discord Mode",
+      voice_call: "Voice Call Mode",
+      google_meet: "Google Meet Mode"
+    };
+    let companionModeRedirectReply = null;
+
+    // Semantic continuation lock:
+    // If user is answering an in-progress single workflow, keep routing on that workflow only.
+    // Prevents cross-channel bleed (e.g. "call arya" flow accidentally firing telegram).
+    if (
+      hasPendingClarification &&
+      turnKind === "workflow_continuation" &&
+      forcedIntent &&
+      forcedIntent !== "multi_action"
+    ) {
+      plannedActionsEarly = [forcedIntent];
+    }
+    isClearlySupportChat =
+      !forcedIntent &&
+      turnKind === "general_chat" &&
+      routing.intent === "support_chat" &&
+      plannedActionsEarly.length === 0 &&
+      String(dataQueryPlan?.action || "none") === "none" &&
+      String(directoryRequest.action || "none") === "none" &&
+      String(actionFallback?.mode || "none") === "none";
+    const earlyPayload = (
+      (typeof resolution.actualMessageToSend === "string" ? resolution.actualMessageToSend.trim() : "") ||
+      String(operationalPlan?.message_payload || "").trim()
+    );
+    const isMultiActionRequest =
+      !isClearlySupportChat &&
+      (
+        forcedIntent === "multi_action" ||
+        (!forcedIntent && plannedActionsEarly.length > 1)
+      );
+
+    // Forced intents (from pending states or stale explicit UI choice) should not
+    // trap routing when the current turn clearly requests a different action.
+    let modeMismatchRedirectReply = null;
+    if (forcedIntent) {
+      const operationalIntentSet = new Set([
+        "general_mail",
+        "physical_mail",
+        "google_meet",
+        "telegram_message",
+        "discord_message",
+        "voice_call",
+        "relay_message",
+        "history_question",
+        "multi_action"
+      ]);
+      const routingIntentCandidate =
+        routing.intent !== "support_chat" && operationalIntentSet.has(routing.intent) ? routing.intent : "";
+      const planIntentCandidate =
+        plannedActionsEarly.length > 1 ? "multi_action" : plannedActionsEarly.length === 1 ? plannedActionsEarly[0] : "";
+      // If user is clearly in normal conversation, release stale forced intent.
+      const requestedIntent =
+        isGenuineChat
+          ? ""
+          : routingIntentCandidate || planIntentCandidate;
+
+      if (requestedIntent && requestedIntent !== forcedIntent) {
+        if (isModeLockedService) {
+          const serviceModeLabelByAction = {
+            general_mail: "Email Mode",
+            physical_mail: "Email Mode",
+            telegram_message: "Telegram Mode",
+            discord_message: "Discord Mode",
+            voice_call: "Voice Call Mode",
+            google_meet: "Google Meet Mode"
+          };
+          const modeLabel =
+            serviceModeLabelByAction[String(requestedIntent || plannedActionsEarly[0] || "").toLowerCase()] ||
+            "the required service mode";
+          modeMismatchRedirectReply = `Please select ${modeLabel} from the action panel below, then proceed.`;
+        }
+      }
+      if (requestedIntent && requestedIntent !== forcedIntent && !isModeLockedService) {
+        const lockCompanionMode = forcedIntent === "support_chat";
+        if (lockCompanionMode) {
+          const requestedAction =
+            plannedActionsEarly.length > 1 ? plannedActionsEarly[0] : (requestedIntent || plannedActionsEarly[0] || "");
+          const modeLabel = serviceModeLabelByAction[String(requestedAction || "").toLowerCase()] || "the required service mode";
+          companionModeRedirectReply = `Please select ${modeLabel} from the action panel below, then proceed.`;
+        } else {
+          forcedIntent = requestedIntent;
+        }
+        activeDraftModes = forcedIntent === "multi_action"
+          ? plannedActionsEarly
+          : [forcedIntent];
+
+        const keepActions = new Set(
+          forcedIntent === "multi_action"
+            ? plannedActionsEarly
+            : [forcedIntent]
+        );
+        const staleClearUpdates = {};
+        if (user.telegramDraftState?.active && !keepActions.has("telegram_message")) {
+          staleClearUpdates["telegramDraftState.active"] = false;
+          staleClearUpdates["telegramDraftState.contactId"] = null;
+        }
+        if (user.discordDraftState?.active && !keepActions.has("discord_message")) {
+          staleClearUpdates["discordDraftState.active"] = false;
+          staleClearUpdates["discordDraftState.channelId"] = null;
+        }
+        if (user.voiceCallDraftState?.active && !keepActions.has("voice_call")) {
+          staleClearUpdates["voiceCallDraftState.active"] = false;
+          staleClearUpdates["voiceCallDraftState.contactId"] = null;
+        }
+        if (
+          user.emailDraftState?.active &&
+          !keepActions.has("general_mail") &&
+          !keepActions.has("physical_mail")
+        ) {
+          staleClearUpdates["emailDraftState.active"] = false;
+          staleClearUpdates["emailDraftState.contactIds"] = [];
+        }
+        if (user.googleMeetDraftState?.active && !keepActions.has("google_meet")) {
+          staleClearUpdates["googleMeetDraftState.active"] = false;
+          staleClearUpdates["googleMeetDraftState.pendingContactIds"] = [];
+        }
+        if (pendingMulti && forcedIntent !== "multi_action") {
+          staleClearUpdates["pendingMultiActionState.active"] = false;
+          staleClearUpdates["pendingMultiActionState.actions"] = [];
+          staleClearUpdates["pendingMultiActionState.contactIds"] = [];
+          staleClearUpdates["pendingMultiActionState.channelIds"] = [];
+        }
+        if (Object.keys(staleClearUpdates).length > 0) {
+          await User.findByIdAndUpdate(userId, { $set: staleClearUpdates });
+        }
+      } else if (!requestedIntent && isGenuineChat && !isModeLockedService) {
+        forcedIntent = "";
+        activeDraftModes = [];
+      }
+    }
+
+    // inferOperationalMode only overrides support_chat when confidence >= 0.8
+    const allowOperationalFallback = hasPendingClarification && !isClearlySupportChat;
+    const resolvedIntent =
+      forcedIntent ||
+      (isMultiActionRequest
+        ? "multi_action"
+        : directoryRequest.action !== "none"
+        ? "support_chat"
+        : routing.intent === "support_chat" &&
+          allowOperationalFallback &&
+          actionFallback.mode !== "none" &&
+          (actionFallback.confidence ?? 0) >= 0.8
+        ? actionFallback.mode
+        : routing.intent);
+
+    if (
+      explicitChoice === "support_chat" &&
+      !companionModeRedirectReply &&
+      plannedActionsEarly.length > 0
+    ) {
+      const modeLabel = serviceModeLabelByAction[String(plannedActionsEarly[0] || "").toLowerCase()] || "the required service mode";
+      companionModeRedirectReply = `Please select ${modeLabel} from the action panel below, then proceed.`;
+    }
+    if (
+      isModeLockedService &&
+      !modeMismatchRedirectReply &&
+      plannedActionsEarly.length > 0 &&
+      !plannedActionsEarly.includes(forcedIntent)
+    ) {
+      const serviceModeLabelByAction = {
+        general_mail: "Email Mode",
+        physical_mail: "Email Mode",
+        telegram_message: "Telegram Mode",
+        discord_message: "Discord Mode",
+        voice_call: "Voice Call Mode",
+        google_meet: "Google Meet Mode"
+      };
+      const modeLabel =
+        serviceModeLabelByAction[String(plannedActionsEarly[0] || "").toLowerCase()] || "the required service mode";
+      modeMismatchRedirectReply = `Please select ${modeLabel} from the action panel below, then proceed.`;
+    }
+
+    const operationalIntents = new Set([
+      "general_mail",
+      "physical_mail",
+      "google_meet",
+      "telegram_message",
+      "discord_message",
+      "voice_call",
+      "relay_message",
+      "history_question",
+      "multi_action"
+    ]);
+
+    const isDataQuery =
+      !forcedIntent &&
+      !operationalIntents.has(resolvedIntent) &&
+      String(dataQueryPlan?.action || "none") !== "none";
+    const blockOperationalDrafting = Boolean(modeMismatchRedirectReply || companionModeRedirectReply);
+
+    const isCompanionModeTurn = resolvedIntent === "support_chat" && !isStrictServiceModeTurn;
+    const needs = Array.isArray(routing.needs) ? routing.needs : [];
+    const isOperationalIntent = operationalIntents.has(resolvedIntent);
+    const isDistressed =
+      isOperationalIntent ? false : routing.distress_level === "moderate" || routing.distress_level === "high";
+    const userEmotion =
+      resolvedIntent === "crisis" ? "crisis" : isDistressed ? "distressed" : "neutral";
+
+    // ── STEP 7: Role match guard ──
+    if (isOperationalIntent && requestedRoles.length && resolvedContactTargets.length) {
+      const hasRoleMatch = requestedRoles.some((role) =>
+        resolvedContactTargets.some((c) => {
+          const typeText = String(c.type || "").toLowerCase();
+          const nameText = String(c.name || "").toLowerCase();
+          return typeText === role || nameText.includes(role);
+        })
+      );
+      if (!hasRoleMatch) {
+        const suggested = resolvedContactTargets[0]?.name
+          ? ` Did you mean ${resolvedContactTargets[0].name}?`
+          : "";
+        return res.json({
+          reply: `I noticed you asked for ${requestedRoles.join(" or ")}, but I do not have a matching saved role in your contacts.${suggested}`,
+          clearActionChoice: true
+        });
+      }
+    }
+
+    // ── STEP 8: Save user memory ──
+    const userMemory = await ConversationMemory.create({
+      userId,
+      role: "user",
+      mode: isCompanionModeTurn ? "companion" : "service",
+      text: message,
+      tags: needs,
+      sentimentScore: routing.confidence ?? 0,
+      emotion: userEmotion
+    });
+
+    const [checkInTask, carePackage] = isCompanionModeTurn
+      ? await Promise.all([
+          maybeScheduleCheckIn({ userId, triggerMemoryId: userMemory._id, message }),
+          upsertDailyCarePackage({ userId, needs, reason: "Detected conversation needs" })
+        ])
+      : [null, null];
+
+    let listenerMatch = null;
+    if (routing.asks_human && isCompanionModeTurn) {
+      listenerMatch = await matchListener({
+        userId,
+        message,
+        emotion: userEmotion,
+        needs,
+        language: user.preferences?.language || "en"
+      });
+    }
+
+    // ── STEP 9: Effective mode ──
+    // For multi_action, effectiveMode is "multi_action" — each draft block checks
+    // plannedActionSet independently instead of matching against a single mode value.
+    const effectiveMode =
+      isDataQuery
+        ? "none"
+        : explicitChoice ||
+          (resolvedIntent === "multi_action"
+            ? "multi_action"
+            : resolvedIntent === "general_mail"
+            ? "general_mail"
+            : resolvedIntent === "physical_mail"
+            ? "physical_mail"
+            : resolvedIntent === "telegram_message"
+            ? "telegram_message"
+            : resolvedIntent === "discord_message"
+            ? "discord_message"
+            : resolvedIntent === "voice_call"
+            ? "voice_call"
+            : resolvedIntent === "relay_message"
+            ? "telegram_message"
+            : resolvedIntent === "google_meet"
+            ? "google_meet"
+            : "none");
+
+    const showChoiceOptions = resolvedIntent === "ambiguous_meet" && !explicitChoice;
+    const plannedActions = plannedActionsEarly; // already computed above
+
+    // ── STALE DRAFT PURGE ──────────────────────────────────────────────────────
+    // When the user starts a NEW explicit request (plannedActions is non-empty),
+    // their current message is the source of truth for which channels to use.
+    // Stale draft states from previous turns (e.g. a lingering discordDraftState)
+    // must NOT bleed into the new request. We compute effectiveActiveDraftModes:
+    // - If planOperationalRequest returned explicit actions → use ONLY those, ignore stale states.
+    // - If planOperationalRequest returned nothing → fall back to activeDraftModes (continuation).
+    const effectiveActiveDraftModes =
+      plannedActions.length > 0
+        ? [] // new explicit request — don't inherit stale draft states
+        : activeDraftModes;
+
+    // If we're purging stale drafts, reset them in DB immediately so they don't
+    // re-fire on the next turn either.
+    // Purge stale drafts only for fresh operational requests.
+    // Do not purge while user is answering an in-progress clarification.
+    if (plannedActions.length > 0 && !isClarificationAnswer && !forcedIntent) {
+      const staleDraftUpdates = {};
+      if (user.discordDraftState?.active && !plannedActions.includes("discord_message")) {
+        staleDraftUpdates["discordDraftState.active"] = false;
+        staleDraftUpdates["discordDraftState.channelId"] = null;
+      }
+      if (user.emailDraftState?.active &&
+          !plannedActions.includes("general_mail") &&
+          !plannedActions.includes("physical_mail")) {
+        staleDraftUpdates["emailDraftState.active"] = false;
+        staleDraftUpdates["emailDraftState.contactIds"] = [];
+      }
+      if (user.telegramDraftState?.active && !plannedActions.includes("telegram_message")) {
+        staleDraftUpdates["telegramDraftState.active"] = false;
+        staleDraftUpdates["telegramDraftState.contactId"] = null;
+      }
+      if (user.voiceCallDraftState?.active && !plannedActions.includes("voice_call")) {
+        staleDraftUpdates["voiceCallDraftState.active"] = false;
+        staleDraftUpdates["voiceCallDraftState.contactId"] = null;
+      }
+      if (Object.keys(staleDraftUpdates).length > 0) {
+        await User.findByIdAndUpdate(userId, { $set: staleDraftUpdates });
+      }
+    }
+    if (user.pendingMultiActionState?.active && !isMultiActionRequest) {
+      await User.findByIdAndUpdate(userId, {
+        $set: {
+          "pendingMultiActionState.active": false,
+          "pendingMultiActionState.actions": [],
+          "pendingMultiActionState.targetScope": null,
+          "pendingMultiActionState.contactIds": [],
+          "pendingMultiActionState.channelIds": [],
+          "pendingMultiActionState.lastUpdatedAt": new Date()
+        }
+      });
+    }
+
+    let mergedPlannedActions = Array.from(new Set([...plannedActions, ...effectiveActiveDraftModes]));
+    if (forcedIntent && forcedIntent !== "multi_action") {
+      mergedPlannedActions = [forcedIntent];
+    }
+    const hasMultiplePlannedActions = !explicitChoice && mergedPlannedActions.length > 1;
+    const effectivePayload = (semanticDraftInput || String(operationalPlan?.message_payload || "")).trim();
+    const plannedActionSet = new Set(mergedPlannedActions);
+
+    // ── CRITICAL GUARD: Only run combined drafts when there is an actual operational intent ──
+    // This prevents "hi" from triggering email+telegram draft blocks.
+    const shouldRunCombinedDrafts =
+      !isClearlySupportChat &&
+      !showChoiceOptions &&
+      !explicitChoice &&
+      hasMultiplePlannedActions &&
+      Boolean(effectivePayload) &&
+      isOperationalIntent;
+
+    // ── STEP 10: History question ──
+    let historyReply = null;
+    if (resolvedIntent === "history_question") {
+      const priorUserMessages = await ConversationMemory.find({
+        userId,
+        role: "user",
+        _id: { $ne: userMemory._id }
+      })
+        .sort({ createdAt: 1 })
+        .limit(300)
+        .lean();
+      const doctorMeetCount = await countDoctorMeetRequests({
+        historyTexts: priorUserMessages.map((m) => m.text),
+        currentQuestion: message
+      });
+      historyReply = `You asked about meeting your doctor ${doctorMeetCount} times in our saved chat history.`;
+    }
+
+    // ── STEP 11: Data query reply ──
+    let dataQueryReply = null;
+    if (isDataQuery) {
+      const qAction = String(dataQueryPlan.action || "none");
+      const qRole = String(dataQueryPlan.role || "none").toLowerCase();
+      const queryContactIds = new Set((dataQueryPlan.resolvedContactIds || []).map((x) => String(x)));
+      const queryContacts = contacts.filter((c) => queryContactIds.has(String(c._id)));
+      const queryChannelIds = new Set((dataQueryPlan.resolvedChannelIds || []).map((x) => String(x)));
+      const queryChannels = discordChannels.filter((c) => queryChannelIds.has(String(c._id)));
+
+      if (qAction === "get_contact_email") {
+        if (queryContacts.length === 1) {
+          const target = queryContacts[0];
+          dataQueryReply = `${target.name}'s email is ${target.email || "not set"}.`;
+        } else if (queryContacts.length > 1) {
+          dataQueryReply = `I found multiple matching contacts:\n${queryContacts
+            .map((c) => `- ${c.name}: ${c.email || "email not set"}`)
+            .join("\n")}`;
+        } else {
+          const names = contacts.map((c) => c.name).slice(0, 10);
+          dataQueryReply = names.length
+            ? `Which contact do you mean? Available contacts: ${names.join(", ")}.`
+            : "No contacts are saved yet.";
+        }
+      } else if (qAction === "get_contact_telegram") {
+        if (queryContacts.length === 1) {
+          const target = queryContacts[0];
+          dataQueryReply = `${target.name}'s Telegram Chat ID is ${target.telegramChatId || "not set"}.`;
+        } else if (queryContacts.length > 1) {
+          dataQueryReply = `I found multiple matching contacts:\n${queryContacts
+            .map((c) => `- ${c.name}: ${c.telegramChatId || "Telegram Chat ID not set"}`)
+            .join("\n")}`;
+        } else {
+          const names = contacts.map((c) => c.name).slice(0, 10);
+          dataQueryReply = names.length
+            ? `Which contact do you mean? Available contacts: ${names.join(", ")}.`
+            : "No contacts are saved yet.";
+        }
+      } else if (qAction === "get_contact_type") {
+        if (queryContacts.length === 1) {
+          const target = queryContacts[0];
+          dataQueryReply = `${target.name} is saved as ${target.type || "unknown"}.`;
+        } else if (queryContacts.length > 1) {
+          dataQueryReply = `I found multiple matching contacts:\n${queryContacts
+            .map((c) => `- ${c.name}: ${c.type || "unknown"}`)
+            .join("\n")}`;
+        } else {
+          const names = contacts.map((c) => c.name).slice(0, 10);
+          dataQueryReply = names.length
+            ? `Which contact do you mean? Available contacts: ${names.join(", ")}.`
+            : "No contacts are saved yet.";
+        }
+      } else if (qAction === "list_callable_contacts") {
+        const source = queryContacts.length ? queryContacts : contacts;
+        if (!source.length) {
+          dataQueryReply = "No contacts are saved yet.";
+        } else {
+          const lines = source.map((c) => {
+            const role = c.type || "unknown";
+            const phone = String(c.phone || "").trim();
+            return `- ${c.name} (${role}) | Phone: ${phone || "not set"}`;
+          });
+          dataQueryReply = `Here are the contacts available in your list for calling:\n${lines.join("\n")}`;
+        }
+      } else if (qAction === "count_contacts_by_role") {
+        if (qRole === "none") {
+          dataQueryReply = "Which role should I count in your contacts?";
+        } else {
+          const count = contacts.filter(
+            (c) => String(c.type || "").toLowerCase() === qRole
+          ).length;
+          dataQueryReply = `You currently have ${count} ${qRole}${count === 1 ? "" : "s"} in your contacts.`;
+        }
+      } else if (qAction === "count_contacts_total") {
+        dataQueryReply = `You currently have ${contacts.length} contact${contacts.length === 1 ? "" : "s"} saved.`;
+      } else if (qAction === "count_channels_total") {
+        dataQueryReply = `You currently have ${discordChannels.length} Discord channel${
+          discordChannels.length === 1 ? "" : "s"
+        } saved.`;
+      } else if (qAction === "count_channels_by_crisis_notify") {
+        const source = queryChannels.length ? queryChannels : discordChannels;
+        const enabled = source.filter((c) => Boolean(c.notifyOnCrisis)).length;
+        dataQueryReply = `${enabled} Discord channel${enabled === 1 ? "" : "s"} are currently marked for crisis notifications.`;
+      } else if (
+        qAction === "summarize_health_24h" ||
+        qAction === "summarize_health_week" ||
+        qAction === "summarize_health_month"
+      ) {
+        const reports = await generateReportsForUser(userId);
+        const report =
+          qAction === "summarize_health_24h"
+            ? reports.daily
+            : qAction === "summarize_health_week"
+            ? reports.weekly
+            : reports.monthly;
+
+        if (!report) {
+          dataQueryReply = "I don’t have enough mood check-ins for that period yet. Share a few updates, and I can summarize them.";
+        } else {
+          const avg = Number(report.avgSentiment || 0);
+          const moodWord =
+            avg <= -0.35 ? "very low" :
+            avg <= -0.15 ? "a bit low" :
+            avg < 0.15 ? "mostly okay" :
+            avg < 0.35 ? "better than usual" :
+            "very positive";
+          const details = report.details || {};
+          const moods = details.moodCounts || {};
+          const swings = Number(details.swingCount || 0);
+          const distressed = Number(moods.distressed ?? report.distressedCount ?? 0);
+          const uplifted = Number(moods.uplifted ?? 0);
+          const neutral = Number(moods.neutral ?? 0);
+          const crisisCount = Number(moods.crisis ?? 0);
+          const count = Number(details.totalEntries || 0);
+          const periodLabel =
+            qAction === "summarize_health_24h"
+              ? "last 24 hours"
+              : qAction === "summarize_health_week"
+              ? "last 7 days"
+              : "last month";
+
+          dataQueryReply =
+            `Here is your mood/health summary for the ${periodLabel}: ` +
+            `from ${count} check-ins, your overall mood looked ${moodWord}. ` +
+            `Low moments: ${distressed}, better moments: ${uplifted}, okay moments: ${neutral}, urgent moments: ${crisisCount}. ` +
+            (swings > 0
+              ? `Your mood changed ${swings} time${swings === 1 ? "" : "s"} in this period.`
+              : "Your mood stayed fairly steady in this period.");
+        }
+      }
+    }
+
+    // ── STEP 12: Directory reply ──
+    let directoryReply = null;
+    if (directoryRequest.action !== "none") {
+      const includeTelegramIds = Boolean(directoryRequest.include_telegram_chat_ids);
+      const includeWebhooks = Boolean(directoryRequest.include_discord_webhooks);
+
+      const contactsList = contacts.length
+        ? contacts
+            .map((c) => {
+              const telegramPart = includeTelegramIds
+                ? c.telegramChatId
+                  ? ` | Telegram Chat ID: ${c.telegramChatId}`
+                  : " | Telegram Chat ID: not set"
+                : c.telegramChatId
+                ? " | Telegram: configured"
+                : " | Telegram: not set";
+              return `- ${c.name} (${c.type}) | Email: ${c.email}${telegramPart}`;
+            })
+            .join("\n")
+        : "No contacts added yet.";
+
+      const channelsList = discordChannels.length
+        ? discordChannels
+            .map((c) => {
+              const webhookPart = includeWebhooks
+                ? ` | Webhook: ${c.webhookUrl}`
+                : " | Webhook: configured";
+              return `- ${c.name}${webhookPart}${
+                c.notifyOnCrisis ? " | Crisis notify: enabled" : " | Crisis notify: disabled"
+              }`;
+            })
+            .join("\n")
+        : "No Discord channels added yet.";
+
+      if (directoryRequest.action === "list_contacts") {
+        directoryReply = `Here are your saved contacts:\n${contactsList}`;
+      } else if (directoryRequest.action === "list_channels") {
+        directoryReply = `Here are your saved Discord channels:\n${channelsList}`;
+      } else {
+        directoryReply = `Here are your saved contacts:\n${contactsList}\n\nHere are your saved Discord channels:\n${channelsList}`;
+      }
+    }
+
+    // ── Compute multiActionClarification early so Steps 13-15 can gate on it ──
+    // (Full DB persistence still happens in Step 17, but we need the value now.)
+    let multiActionClarification = null;
+    if (!historyReply && !dataQueryReply && hasMultiplePlannedActions && isOperationalIntent && !effectivePayload) {
+      const scopeText =
+        operationalPlan?.target_scope === "all_contacts"
+          ? "all your saved contacts"
+          : operationalPlan?.target_scope === "all_channels"
+          ? "all selected channels"
+          : "the selected recipients";
+      multiActionClarification = `What exact message should I send to ${scopeText}? I can then prepare ${mergedPlannedActions.join(" + ")}.`;
+    }
+
+    // ── STEP 13: Email draft ──
+    // GUARD: Only activate when routing actually confirmed an email intent
+    let emailDraft = null;
+    let emailAgentMessage = null;
+    let emailClarification = null;
+    let emailSendReady = false;
+    let emailTargets = [];
+
+    const isEmailIntent =
+      resolvedIntent === "general_mail" ||
+      resolvedIntent === "physical_mail" ||
+      forcedIntent === "general_mail" ||
+      forcedIntent === "physical_mail";
+
+    const emailInPlan = plannedActionSet.has("general_mail") || plannedActionSet.has("physical_mail");
+    // Also check pendingMulti actions as fallback — covers payload turns where
+    // planOperationalRequest returns [] because the message has no action verb.
+    const emailInPending =
+      (pendingMulti?.actions || []).includes("general_mail") ||
+      (pendingMulti?.actions || []).includes("physical_mail");
+
+    const emailShouldActivate =
+      isEmailIntent ||
+      ((resolvedIntent === "multi_action" || effectiveMode === "multi_action") &&
+        (emailInPlan || emailInPending));
+
+    if (
+      !blockOperationalDrafting &&
+      !dataQueryReply &&
+      !historyReply &&
+      !showChoiceOptions &&
+      !isClearlySupportChat &&
+      !multiActionClarification &&
+      emailShouldActivate &&
+      (effectiveMode === "physical_mail" ||
+        effectiveMode === "general_mail" ||
+        effectiveMode === "multi_action" ||
+        emailInPlan)
+    ) {
+      emailAgentMessage = "I am creating the email now.";
+      emailTargets = resolvedContactTargets;
+      const freshEmailIntentThisTurn =
+        plannedActions.includes("general_mail") || plannedActions.includes("physical_mail");
+      const shouldReusePersistedEmailTargets =
+        !emailTargets.length &&
+        user.emailDraftState?.active &&
+        (isClarificationAnswer || !freshEmailIntentThisTurn);
+      if (shouldReusePersistedEmailTargets) {
+        const persistedEmailIds = new Set((user.emailDraftState.contactIds || []).map((x) => String(x)));
+        const persistedEmailTargets = contacts.filter((c) => persistedEmailIds.has(String(c._id)));
+        if (persistedEmailTargets.length) {
+          emailTargets = persistedEmailTargets;
+        }
+      }
+      const emailTarget = emailTargets.length === 1 ? emailTargets[0] : selectedContact || professional;
+      if (!emailTargets.length) {
+        const names = contacts.map((c) => c.name).slice(0, 8);
+        emailClarification = names.length
+          ? `Which contact should I send this email to? Available contacts: ${names.join(", ")}.`
+          : "No contacts found. Add contacts in Dashboard first.";
+      } else {
+        const emailTargetName =
+          emailTargets.length > 1 ? "all selected contacts" : emailTarget?.name || "selected contact";
+        const emailTargetType =
+          emailTargets.length > 1 ? "multiple" : emailTarget?.type || "unknown";
+        emailDraft = emailTarget
+          ? await generateContactEmailDraft({
+              contactName: emailTargetName,
+              contactType: emailTargetType,
+              userName: user.name,
+              context: semanticDraftInput
+            })
+          : emailTargets.length > 1
+          ? await generateContactEmailDraft({
+              contactName: "all selected contacts",
+              contactType: "multiple",
+              userName: user.name,
+              context: semanticDraftInput
+            })
+          : null;
+
+        if (!professional && !emailTarget) {
+          emailDraft = {
+            subject: "",
+            body: "No contacts available. Add a contact in Dashboard to draft outreach email.",
+            needsClarification: false,
+            clarificationQuestion: ""
+          };
+        } else if (emailDraft?.needsClarification) {
+          emailClarification =
+            emailDraft.clarificationQuestion || "Please tell me the exact email message you want to send.";
+          emailDraft = null;
+        } else if (emailDraft?.subject && emailDraft?.body) {
+          emailSendReady = true;
+        }
+      }
+      await User.findByIdAndUpdate(userId, {
+        $set: {
+          emailDraftState: {
+            // active=true only while awaiting clarification, NOT when send-ready.
+            // Once sendReady, the frontend sends and we clear state so next message
+            // doesn't re-enter the email flow.
+            active: Boolean(emailClarification),
+            mode: effectiveMode === "physical_mail" ? "physical_mail" : "general_mail",
+            contactIds: emailTargets.map((c) => c._id),
+            lastUpdatedAt: new Date()
+          }
+        }
+      });
+    }
+
+    // ── STEP 14: Telegram draft ──
+    // GUARD: Only activate when routing actually confirmed a telegram intent
+    let telegramMessageDraft = null;
+    let telegramAgentMessage = null;
+    let telegramClarification = null;
+    let telegramSendReady = false;
+    let telegramTarget = null;
+    let telegramTargets = [];
+
+    const isTelegramIntent =
+      resolvedIntent === "telegram_message" ||
+      resolvedIntent === "relay_message" ||
+      forcedIntent === "telegram_message" ||
+      forcedIntent === "relay_message";
+
+    const telegramInPlan = plannedActionSet.has("telegram_message");
+    const telegramInPending = (pendingMulti?.actions || []).includes("telegram_message");
+
+    const telegramShouldActivate =
+      isTelegramIntent ||
+      ((resolvedIntent === "multi_action" || effectiveMode === "multi_action") &&
+        (telegramInPlan || telegramInPending));
+
+    if (
+      !blockOperationalDrafting &&
+      !dataQueryReply &&
+      !historyReply &&
+      !showChoiceOptions &&
+      !isClearlySupportChat &&
+      !multiActionClarification &&
+      telegramShouldActivate &&
+      (effectiveMode === "telegram_message" ||
+        effectiveMode === "multi_action" ||
+        telegramInPlan)
+    ) {
+      telegramTargets = resolvedContactTargets.filter((c) => Boolean(c.telegramChatId));
+      const persistedTelegramTarget =
+        user.telegramDraftState?.active && user.telegramDraftState?.contactId
+          ? contacts.find((c) => String(c._id) === String(user.telegramDraftState.contactId) && Boolean(c.telegramChatId))
+          : null;
+      if (!telegramTargets.length && persistedTelegramTarget) {
+        telegramTargets = [persistedTelegramTarget];
+      }
+      telegramTarget =
+        telegramTargets.length === 1 ? telegramTargets[0] : selectedContact || professional;
+      if (!resolvedContactTargets.length && !telegramTargets.length) {
+        const names = contacts.map((c) => c.name).slice(0, 8);
+        telegramClarification = names.length
+          ? `Which contact should I message on Telegram? Available contacts: ${names.join(", ")}.`
+          : "No contacts found. Add contacts in Dashboard first.";
+      } else if (!telegramTargets.length) {
+        telegramClarification =
+          "That contact is missing a Telegram Chat ID. Update it in Dashboard or choose another contact.";
+      } else {
+        const previousDetails =
+          telegramTarget &&
+          user.telegramDraftState?.active &&
+          String(user.telegramDraftState?.contactId || "") === String(telegramTarget._id)
+            ? user.telegramDraftState.details || {}
+            : {};
+        const telegramTargetName =
+          telegramTargets.length > 1 ? "all selected contacts" : telegramTarget?.name || "selected contact";
+        const telegramTargetType =
+          telegramTargets.length > 1 ? "multiple" : telegramTarget?.type || "unknown";
+        const draftState = await updateTelegramDraftState({
+          contactName: telegramTargetName,
+          contactType: telegramTargetType,
+          userName: user.name,
+          newMessage: semanticDraftInput,
+          currentDetails: previousDetails
+        });
+        telegramMessageDraft = { text: draftState.draftText || "" };
+        if (!draftState.ready || !draftState.draftText) {
+          const sufficiency = await assessDirectMessageSufficiency({
+            platform: "telegram",
+            message: semanticDraftInput,
+            recentContext: recentChrono
+              .map((m) => `${m.role}: ${m.text}`)
+              .join("\n")
+              .slice(0, 1500)
+          });
+          if (sufficiency?.sufficient && semanticDraftInput) {
+            telegramMessageDraft = { text: semanticDraftInput };
+            telegramSendReady = true;
+          } else {
+            telegramClarification =
+              draftState.clarificationQuestion ||
+              sufficiency?.clarification_question ||
+              (draftState.missingFields?.length
+                ? `Please provide: ${draftState.missingFields.join(", ")}.`
+                : "Please add a bit more detail so I can finalize the Telegram message.");
+          }
+        } else {
+          telegramSendReady = true;
+        }
+        // Persist state: active only while awaiting clarification, NOT when send-ready
+        await User.findByIdAndUpdate(userId, {
+          $set: {
+            telegramDraftState: {
+              active: Boolean(telegramClarification),
+              contactId: telegramTarget?._id || null,
+              details: draftState.updatedDetails,
+              lastUpdatedAt: new Date()
+            }
+          }
+        });
+      }
+      if (!telegramClarification) {
+        telegramAgentMessage = "I am preparing the Telegram message now.";
+      }
+    }
+
+    // ── STEP 15: Discord draft ──
+    // GUARD: Only activate when routing actually confirmed a discord intent
+    let discordMessageDraft = null;
+    let discordAgentMessage = null;
+    let discordClarification = null;
+    let discordSendReady = false;
+    let discordTarget = null;
+    let discordTargets = [];
+
+    const isDiscordIntent =
+      resolvedIntent === "discord_message" ||
+      forcedIntent === "discord_message";
+
+    const discordInPlan = plannedActionSet.has("discord_message");
+    const discordInPending = (pendingMulti?.actions || []).includes("discord_message");
+
+    const discordShouldActivate =
+      isDiscordIntent ||
+      ((resolvedIntent === "multi_action" || effectiveMode === "multi_action") &&
+        (discordInPlan || discordInPending));
+
+    if (
+      !blockOperationalDrafting &&
+      !dataQueryReply &&
+      !historyReply &&
+      !showChoiceOptions &&
+      !isClearlySupportChat &&
+      !multiActionClarification &&
+      discordShouldActivate &&
+      (effectiveMode === "discord_message" ||
+        effectiveMode === "multi_action" ||
+        discordInPlan)
+    ) {
+      discordTargets = resolvedDiscordTargets;
+      const persistedDiscordTarget =
+        user.discordDraftState?.active && user.discordDraftState?.channelId
+          ? discordChannels.find((c) => String(c._id) === String(user.discordDraftState.channelId))
+          : null;
+      if (!discordTargets.length && persistedDiscordTarget) {
+        discordTargets = [persistedDiscordTarget];
+      }
+      discordTarget = discordTargets.length === 1 ? discordTargets[0] : null;
+      if (!discordTargets.length) {
+        if (!discordChannels.length) {
+          discordClarification =
+            "No Discord channels found. Add Discord channel webhooks in Dashboard first.";
+        } else {
+          const channelNames = discordChannels.map((c) => c.name).slice(0, 8);
+          discordClarification = `Which Discord channel should I post to? Available channels: ${channelNames.join(", ")}.`;
+        }
+      } else {
+        const previousDetails =
+          discordTarget &&
+          user.discordDraftState?.active &&
+          String(user.discordDraftState?.channelId || "") === String(discordTarget._id)
+            ? user.discordDraftState.details || {}
+            : {};
+        const sanitizedDiscordDetails = {
+          purpose: String(previousDetails.purpose || ""),
+          date: String(previousDetails.date || ""),
+          time: String(previousDetails.time || ""),
+          location: String(previousDetails.location || ""),
+          contactFullName: "",
+          invitees: "",
+          notes: String(previousDetails.notes || "")
+        };
+        const discordTargetLabel =
+          discordTargets.length > 1
+            ? "all selected channels"
+            : discordTarget?.name || "the selected channel";
+        const discordTargetName =
+          discordTargets.length > 1 ? "all selected channels" : discordTarget?.name || "selected channel";
+        const discordTargetType = discordTargets.length > 1 ? "multiple" : "discord";
+        const draftState = await updateDiscordDraftState({
+          contactName: discordTargetName,
+          contactType: discordTargetType,
+          userName: user.name,
+          newMessage: semanticDraftInput,
+          currentDetails: sanitizedDiscordDetails
+        });
+        discordMessageDraft = { text: draftState.draftText || "" };
+        if (!draftState.ready || !draftState.draftText) {
+          const sufficiency = await assessDirectMessageSufficiency({
+            platform: "discord",
+            message: semanticDraftInput,
+            recentContext: recentChrono
+              .map((m) => `${m.role}: ${m.text}`)
+              .join("\n")
+              .slice(0, 1500)
+          });
+          if (sufficiency?.sufficient && semanticDraftInput) {
+            discordMessageDraft = { text: semanticDraftInput };
+            discordSendReady = true;
+          } else {
+            discordClarification =
+              `What would you like to post in ${discordTargetLabel}?`;
+          }
+        } else {
+          discordSendReady = true;
+        }
+        // Persist state: active only while awaiting clarification, NOT when send-ready
+        await User.findByIdAndUpdate(userId, {
+          $set: {
+            discordDraftState: {
+              active: Boolean(discordClarification),
+              channelId: discordTarget?._id || null,
+              details: draftState.updatedDetails,
+              lastUpdatedAt: new Date()
+            }
+          }
+        });
+      }
+      if (!discordClarification) {
+        discordAgentMessage = "I am preparing the Discord message now.";
+      }
+    }
+
+    // ── STEP 16: Voice call draft ──
+    let voiceCallDraft = null;
+    let voiceCallAgentMessage = null;
+    let voiceCallClarification = null;
+    let voiceCallSendReady = false;
+    let voiceCallTargets = [];
+    if (
+      !blockOperationalDrafting &&
+      !dataQueryReply &&
+      !historyReply &&
+      !showChoiceOptions &&
+      !isClearlySupportChat &&
+      effectiveMode === "voice_call"
+    ) {
+      voiceCallTargets = resolvedContactTargets;
+      const persistedVoiceTarget =
+        user.voiceCallDraftState?.active && user.voiceCallDraftState?.contactId
+          ? contacts.find((c) => String(c._id) === String(user.voiceCallDraftState.contactId) && Boolean(c.phone))
+          : null;
+      if (!voiceCallTargets.length && persistedVoiceTarget) {
+        voiceCallTargets = [persistedVoiceTarget];
+      }
+      if (!voiceCallTargets.length) {
+        const names = contacts.map((c) => c.name).slice(0, 8);
+        voiceCallClarification = names.length
+          ? `Which contact should I call? Available contacts: ${names.join(", ")}.`
+          : "No contacts found. Add contacts in Dashboard first.";
+      } else if (voiceCallTargets.length > 1) {
+        voiceCallClarification = `I found multiple contacts (${voiceCallTargets
+          .map((c) => c.name)
+          .join(", ")}). Which one should I call?`;
+      } else if (!String(voiceCallTargets[0]?.phone || "").trim()) {
+        voiceCallClarification = `${voiceCallTargets[0].name} does not have a phone number saved. Update it in Dashboard first.`;
+      } else {
+        const sufficiency = await assessDirectMessageSufficiency({
+          platform: "voice_call",
+          message: String(semanticDraftInput || message || "").trim(),
+          recentContext: recentContextText
+        });
+        if (!Boolean(sufficiency?.sufficient)) {
+          voiceCallClarification =
+            sufficiency?.clarification_question ||
+            `What should I say on the call to ${voiceCallTargets[0].name}?`;
+        }
+      }
+
+      if (!voiceCallClarification) {
+        const callTarget = voiceCallTargets[0];
+        const callScript = await generateVoiceCallScript({
+          contactName: callTarget.name,
+          contactType: callTarget.type || "unknown",
+          userName: user.name,
+          context: String(semanticDraftInput || message || "").trim()
+        });
+        if (callScript?.needsClarification || !String(callScript?.script || "").trim()) {
+          voiceCallClarification =
+            callScript?.clarificationQuestion || `Please share the exact message I should relay to ${callTarget.name}.`;
+        } else {
+          voiceCallDraft = { text: String(callScript.script).trim() };
+          voiceCallSendReady = true;
+          voiceCallAgentMessage = "I am preparing the voice call script now.";
+        }
+      }
+      await User.findByIdAndUpdate(userId, {
+        $set: {
+          voiceCallDraftState: {
+            active: Boolean(voiceCallClarification),
+            contactId: voiceCallTargets[0]?._id || null,
+            lastUpdatedAt: new Date()
+          }
+        }
+      });
+    }
+
+    // ── STEP 17: Relay message ──
+    let relayMessage = null;
+    let relayResult = null;
+    let relayAgentMessage = null;
+    if (
+      !blockOperationalDrafting &&
+      !dataQueryReply &&
+      !historyReply &&
+      !showChoiceOptions &&
+      !isClearlySupportChat &&
+      effectiveMode === "relay_message"
+    ) {
+      relayAgentMessage = "I am relaying that message to your contact now.";
+      const relayTarget = selectedContact || professional;
+      if (!relayTarget) {
+        relayResult = { sent: false, reason: "No contact found. Please add/select a contact first." };
+      } else {
+        relayMessage = await extractRelayMessage({
+          message: resolvedMessagePayload || message,
+          recentContext: recentForIntent
+            .map((m) => `${m.role}: ${m.text}`)
+            .join("\n")
+            .slice(0, 2200)
+        });
+        relayResult = await relayToContact(relayTarget._id, user.name, relayMessage, {
+          userPhone: user.phone || ""
+        });
+      }
+    }
+
+    // ── STEP 18: Google Meet ──
+    let scheduledMeet = null;
+    let meetClarification = null;
+    let meetProposal = null;
+    let interactionChoice = null;
+    // multiActionClarification already computed above — just handle DB persistence here.
+
+    if (!blockOperationalDrafting && !historyReply && !dataQueryReply && hasMultiplePlannedActions && isOperationalIntent) {
+      if (!effectivePayload) {
+        // multiActionClarification is already set above. Now persist the pending state.
+        await User.findByIdAndUpdate(userId, {
+          $set: {
+            pendingMultiActionState: {
+              active: true,
+              actions: mergedPlannedActions,
+              targetScope: operationalPlan?.target_scope || "unknown",
+              contactIds: resolvedContactTargets.map((c) => c._id),
+              channelIds: resolvedDiscordTargets.map((c) => c._id),
+              lastUpdatedAt: new Date()
+            }
+          }
+        });
+      } else if (pendingMulti?.active) {
+        // Payload arrived — clear the pending state now that we have the message
+        await User.findByIdAndUpdate(userId, {
+          $set: {
+            "pendingMultiActionState.active": false,
+            "pendingMultiActionState.actions": []
+          }
+        });
+      }
+    } else if (pendingMulti?.active && effectivePayload) {
+      // Payload arrived for a previously persisted multi-action — clear it
+      await User.findByIdAndUpdate(userId, {
+        $set: {
+          "pendingMultiActionState.active": false,
+          "pendingMultiActionState.actions": []
+        }
+      });
+    }
+    // Also clear individual draft states when send-ready fires (handled in each block)
+    if (!blockOperationalDrafting && !interactionChoice && showChoiceOptions) {
+      interactionChoice = {
+        text: "Would you like me to send an email for a physical meet, send a Telegram message, send a Discord message, or schedule a Google Meet?",
+        options: [
+          { id: "physical_mail", label: "Send Mail For Physical Meet" },
+          { id: "telegram_message", label: "Send Telegram Message" },
+          { id: "discord_message", label: "Send Discord Message" },
+          { id: "google_meet", label: "Schedule Google Meet" }
+        ],
+        baseMessage: message
+      };
+    }
+
+    if (
+      !blockOperationalDrafting &&
+      !dataQueryReply &&
+      !historyReply &&
+      !showChoiceOptions &&
+      !isClearlySupportChat &&
+      effectiveMode === "google_meet"
+    ) {
+      // ── Multi-contact Google Meet support ──
+      // Determine the effective meet targets semantically from operational planner + persisted state.
+      const wantsAll =
+        operationalPlan?.target_scope === "all_contacts" ||
+        user.googleMeetDraftState?.wantsAll === true;
+
+      // Restore previously resolved contacts from persisted draft state
+      // (e.g. user already said "all of them", we asked for date, now they provide it)
+      const pendingMeetContactIds = new Set(
+        (user.googleMeetDraftState?.pendingContactIds || []).map((x) => String(x))
+      );
+      const restoredMeetContacts = pendingMeetContactIds.size > 0
+        ? contacts.filter((c) => pendingMeetContactIds.has(String(c._id)))
+        : [];
+      const hasExplicitSpecificTargets =
+        resolvedContactTargets.length > 0 &&
+        operationalPlan?.target_scope !== "all_contacts";
+      const effectiveWantsAll = hasExplicitSpecificTargets ? false : wantsAll;
+
+      let meetTargets = effectiveWantsAll
+        ? contacts.slice()
+        : restoredMeetContacts.length > 0
+        ? restoredMeetContacts
+        : resolvedContactTargets.length > 0
+        ? resolvedContactTargets
+        : [];
+
+      // Apply role filter only when user explicitly asked for a specific role
+      const roleNeeds = requestedRoles.filter((r) => r === "doctor" || r === "psychiatrist");
+      if (!effectiveWantsAll && roleNeeds.length > 0) {
+        const roleFiltered = meetTargets.filter((c) =>
+          roleNeeds.includes(String(c.type || "").toLowerCase())
+        );
+        if (roleFiltered.length > 0) meetTargets = roleFiltered;
+      }
+
+      if (!meetTargets.length) {
+        // No contacts resolved at all — ask who, and save pending state so next
+        // turn ("all of them") correctly resumes the google_meet flow.
+        const names = contacts.map((c) => `${c.name} (${c.type})`).slice(0, 10);
+        meetClarification = names.length
+          ? `Who should I schedule the meet with? You can say "all of them" or name specific contacts. Available: ${names.join(", ")}.`
+          : "Please add contacts first, then I can schedule a Google Meet.";
+        // Persist pending meet state so follow-up turns restore the flow
+        await User.findByIdAndUpdate(userId, {
+          $set: {
+            googleMeetDraftState: {
+                active: true,
+                wantsAll: effectiveWantsAll,
+                pendingContactIds: [],
+                stage: "awaiting_who",
+                lastUpdatedAt: new Date()
+              }
+          }
+        });
+      } else {
+        // We have targets — now check for exact date/time.
+        // Parse current user message first to avoid assistant example text
+        // (e.g. "3:00 PM") overriding user-entered times.
+        const parsedCurrent = extractExactDateTime(message);
+        const parsedFallback = parsedCurrent
+          ? null
+          : extractExactDateTime(
+              recentChrono
+                .filter((m) => m.role === "user")
+                .slice(-4)
+                .map((m) => m.text)
+                .join(" ")
+            );
+        const parsed = parsedCurrent || parsedFallback;
+        if (!parsed) {
+          // MUST ask for date/time explicitly — never assume
+          const targetNames = meetTargets.map((c) => c.name).join(", ");
+          meetClarification = `I'll schedule a Google Meet with ${targetNames}. Please provide the exact date, time, and year (e.g. "March 15 2026 at 3:00 PM").`;
+          // Persist pending meet state with resolved contacts so next turn (with date) resumes correctly
+          await User.findByIdAndUpdate(userId, {
+            $set: {
+              googleMeetDraftState: {
+                active: true,
+                wantsAll: effectiveWantsAll,
+                pendingContactIds: meetTargets.map((c) => c._id),
+                stage: "awaiting_datetime",
+                lastUpdatedAt: new Date()
+              }
+            }
+          });
+        } else {
+          // All good — create proposal with multiple contacts
+          const proposal = await MeetProposal.create({
+            userId,
+            contactId: meetTargets[0]._id,
+            contactIds: meetTargets.map((c) => c._id),
+            requestedByText: message,
+            startAt: parsed.startAt,
+            endAt: parsed.endAt,
+            timezone: effectiveTimezone,
+            expiresAt: new Date(Date.now() + 30 * 60 * 1000)
+          });
+          const targetNames = meetTargets.map((c) => c.name).join(", ");
+          meetProposal = {
+            proposalId: proposal._id,
+            contacts: meetTargets.map((c) => ({ id: c._id, name: c.name, email: c.email })),
+            contact: { id: meetTargets[0]._id, name: meetTargets[0].name, email: meetTargets[0].email },
+            startAt: proposal.startAt,
+            endAt: proposal.endAt,
+            timezone: proposal.timezone,
+            askConfirmation: true
+          };
+          // Clear the pending meet state — flow is complete
+          await User.findByIdAndUpdate(userId, {
+            $set: {
+              googleMeetDraftState: {
+                active: false,
+                wantsAll: false,
+                pendingContactIds: [],
+                stage: null,
+                lastUpdatedAt: new Date()
+              }
+            }
+          });
+        }
+      }
+    }
+
+    // ── STEP 18: Global crisis guard (always-on across all modes) ──
+    const crisisContact = contacts.find((c) => c.notifyOnCrisis) || null;
+    const graphOut = await runSupportGraph({
+      userId,
+      userName: user.name,
+      message,
+      sleepHours: user.preferences?.healthOptIn ? user.healthSnapshot?.sleepHours : undefined,
+      pendingCrisis: user.crisisGuard || { awaitingConfirmation: false, triggerText: "" },
+      crisisContactName: crisisContact?.name || "your trusted contact",
+      contacts,
+      discordChannels,
+      emergencyAction: async () =>
+        handlePotentialCrisis({
+          userId,
+          message,
+          crisisScore: 1,
+          preferredContactId:
+            user.crisisGuard?.contactId || crisisContact?._id || null
+        }),
+      memoryEnabled: isCompanionModeTurn
+    });
+    const crisis = graphOut.crisisResult;
+    const crisisAction = graphOut.crisisDecision?.action || "none";
+    if (crisisAction === "request_confirmation") {
+      await User.findByIdAndUpdate(userId, {
+        $set: {
+          crisisGuard: {
+            awaitingConfirmation: true,
+            askedAt: new Date(),
+            triggerText: message,
+            contactId: crisisContact?._id || null
+          }
+        }
+      });
+    } else if (crisisAction === "trigger_alert" || crisisAction === "cancel_alert") {
+      await User.findByIdAndUpdate(userId, {
+        $set: {
+          crisisGuard: {
+            awaitingConfirmation: false,
+            askedAt: null,
+            triggerText: "",
+            contactId: null
+          }
+        }
+      });
+    }
+    const hasCrisisInterventionReply =
+      crisisAction !== "none" && Boolean(String(graphOut.reply || "").trim());
+
+    // ── STEP 19: Build reply ──
+    let reply = null;
+    if (hasCrisisInterventionReply) {
+      reply = graphOut.reply;
+    } else if (modeMismatchRedirectReply) {
+      reply = modeMismatchRedirectReply;
+    } else if (companionModeRedirectReply) {
+      reply = companionModeRedirectReply;
+    } else if (pendingWorkflowCancelReply) {
+      reply = pendingWorkflowCancelReply;
+    } else if (dataQueryReply) {
+      reply = dataQueryReply;
+    } else if (historyReply) {
+      reply = historyReply;
+    } else if (directoryReply) {
+      reply = directoryReply;
+    }
+
+    const controlledFlow = Boolean(
+      multiActionClarification ||
+        interactionChoice ||
+        meetClarification ||
+        meetProposal ||
+        emailAgentMessage ||
+        emailClarification ||
+        telegramAgentMessage ||
+        discordAgentMessage ||
+        voiceCallAgentMessage ||
+        relayAgentMessage ||
+        telegramClarification ||
+        discordClarification ||
+        voiceCallClarification
+    );
+
+    if (reply) {
+      // already set above
+    } else if (controlledFlow) {
+      if (multiActionClarification) {
+        reply = multiActionClarification;
+      } else if (meetProposal) {
+        const propNames = meetProposal.contacts
+          ? meetProposal.contacts.map((c) => c.name).join(", ")
+          : meetProposal.contact.name;
+        reply = `I've prepared a Google Meet proposal for ${propNames}. A calendar invite will be sent to all of them with the meet link. Please confirm below to schedule.`;
+      } else if (meetClarification) {
+        reply = meetClarification;
+      } else if (emailClarification) {
+        reply = emailClarification;
+      } else if (telegramClarification) {
+        reply = telegramClarification;
+      } else if (discordClarification) {
+        reply = discordClarification;
+      } else if (voiceCallClarification) {
+        reply = voiceCallClarification;
+      } else if (interactionChoice) {
+        reply = interactionChoice.text;
+      } else if (relayAgentMessage) {
+        if (relayResult?.sent) {
+          reply = `I've relayed that to ${relayResult.contact?.name || "your contact"}. Stay with me, I'm right here.`;
+        } else {
+          reply = relayResult?.reason || "I could not relay that message right now.";
+        }
+      } else {
+        // ── Multi-action: combine all active agent messages into one reply ──
+        const agentParts = [];
+        if (emailAgentMessage) agentParts.push(emailAgentMessage);
+        if (telegramAgentMessage) agentParts.push(telegramAgentMessage);
+        if (discordAgentMessage) agentParts.push(discordAgentMessage);
+        if (voiceCallAgentMessage) agentParts.push(voiceCallAgentMessage);
+        if (agentParts.length > 0) {
+          reply = agentParts.join(" ");
+        }
+      }
+    } else {
+      // Companion response when no operational/data workflow reply is active.
+      reply = graphOut.reply;
+    }
+
+    // ── STEP 20: Save assistant memory ──
+    if (!String(reply || "").trim()) {
+      reply = "I am here with you. Please rephrase once and I will help.";
+    }
+    await ConversationMemory.create({
+      userId,
+      role: "assistant",
+      mode: isCompanionModeTurn ? "companion" : "service",
+      text: reply,
+      tags: needs,
+      sentimentScore: 0,
+      emotion: "supportive"
+    });
+
+    const reports = await generateReportsForUser(userId);
+
+    const meetSuggestion =
+      resolvedIntent === "support_chat" && isDistressed && contacts.length
+        ? {
+            text: "You seem distressed. I can schedule an immediate or 2-day-later Google Meet with one of your contacts.",
+            contacts: contacts.slice(0, 5).map((c) => ({
+              id: c._id,
+              name: c.name,
+              type: c.type,
+              email: c.email
+            }))
+          }
+        : null;
+    const suppressOperationalPayloads = Boolean(modeMismatchRedirectReply || companionModeRedirectReply);
+
+    res.json({
+      reply,
+      emotion: userEmotion,
+      tips: [],
+      scheduledCheckIn: checkInTask
+        ? { id: checkInTask._id, scheduledFor: checkInTask.scheduledFor }
+        : null,
+      carePackage: carePackage
+        ? { id: carePackage._id, items: carePackage.items }
+        : null,
+      listenerMatch: listenerMatch
+        ? {
+            matchId: listenerMatch.match._id,
+            listener: {
+              id: listenerMatch.listener._id,
+              name: listenerMatch.listener.name,
+              specialties: listenerMatch.listener.specialties
+            },
+            handoffSummary: listenerMatch.match.summary
+          }
+        : null,
+      emailDraft: suppressOperationalPayloads ? null : emailDraft,
+      emailAgentMessage: suppressOperationalPayloads ? null : emailAgentMessage,
+      emailClarification: suppressOperationalPayloads ? null : emailClarification,
+      emailSendReady: suppressOperationalPayloads ? false : emailSendReady,
+      emailTargets: suppressOperationalPayloads
+        ? []
+        : emailTargets.map((c) => ({ id: c._id, name: c.name, email: c.email })),
+      telegramMessageDraft: suppressOperationalPayloads ? null : telegramMessageDraft,
+      telegramAgentMessage: suppressOperationalPayloads ? null : telegramAgentMessage,
+      telegramClarification: suppressOperationalPayloads ? null : telegramClarification,
+      telegramSendReady: suppressOperationalPayloads ? false : telegramSendReady,
+      telegramTargets: suppressOperationalPayloads
+        ? []
+        : telegramTargets.map((c) => ({
+        id: c._id,
+        name: c.name,
+        telegramChatId: c.telegramChatId || ""
+      })),
+      telegramTarget: suppressOperationalPayloads
+        ? null
+        : telegramTarget
+        ? { id: telegramTarget._id, name: telegramTarget.name, telegramChatId: telegramTarget.telegramChatId || "" }
+        : null,
+      discordMessageDraft: suppressOperationalPayloads ? null : discordMessageDraft,
+      discordAgentMessage: suppressOperationalPayloads ? null : discordAgentMessage,
+      discordClarification: suppressOperationalPayloads ? null : discordClarification,
+      discordSendReady: suppressOperationalPayloads ? false : discordSendReady,
+      discordTargets: suppressOperationalPayloads ? [] : discordTargets.map((c) => ({ id: c._id, name: c.name })),
+      discordTarget: suppressOperationalPayloads
+        ? null
+        : discordTarget
+        ? { id: discordTarget._id, name: discordTarget.name }
+        : null,
+      voiceCallDraft: suppressOperationalPayloads ? null : voiceCallDraft,
+      voiceCallAgentMessage: suppressOperationalPayloads ? null : voiceCallAgentMessage,
+      voiceCallClarification: suppressOperationalPayloads ? null : voiceCallClarification,
+      voiceCallSendReady: suppressOperationalPayloads ? false : voiceCallSendReady,
+      voiceCallTargets: suppressOperationalPayloads
+        ? []
+        : voiceCallTargets.map((c) => ({
+        id: c._id,
+        name: c.name,
+        phone: c.phone || ""
+      })),
+      relayMessage: suppressOperationalPayloads ? null : relayMessage,
+      relayResult: suppressOperationalPayloads ? null : relayResult,
+      relayAgentMessage: suppressOperationalPayloads ? null : relayAgentMessage,
+      scheduledMeet: suppressOperationalPayloads ? null : scheduledMeet,
+      meetClarification: suppressOperationalPayloads ? null : meetClarification,
+      meetProposal: suppressOperationalPayloads ? null : meetProposal,
+      interactionChoice: suppressOperationalPayloads ? null : interactionChoice,
+      meetSuggestion,
+      moodReports: reports,
+      crisis,
+      clearActionChoice: Boolean(directoryReply || dataQueryReply || suppressOperationalPayloads)
+    });
+  } catch (err) {
+    next(err);
+  }
+});
+
+
+router.post("/schedule-meet", async (req, res, next) => {
+  try {
+    const userId = req.user._id;
+    const { contactId, when } = req.body;
+    const user = await User.findById(userId);
+    const contact = await Contact.findOne({ _id: contactId, userId });
+    if (!contact) return res.status(404).json({ error: "Contact not found." });
+    const googleAccessToken = await getValidGoogleAccessToken(user);
+    const result = await createGoogleMeetAfterDays({
+      accessToken: googleAccessToken,
+      calendarId: user.integrations?.googleCalendar?.calendarId || "primary",
+      timezone: user.timezone || "UTC",
+      attendeeEmail: contact.email,
+      attendeeName: contact.name,
+      days: when === "immediate" ? 0 : 2
+    });
+    res.json(result);
+  } catch (err) {
+    next(err);
+  }
+});
+
+router.post("/confirm-meet", async (req, res, next) => {
+  try {
+    const userId = req.user._id;
+    const { proposalId, confirm, clientTimezone } = req.body;
+    const proposal = await MeetProposal.findOne({ _id: proposalId, userId, status: "pending" });
+    if (!proposal) return res.status(404).json({ error: "Meet proposal not found or expired." });
+    if (proposal.expiresAt < new Date()) {
+      proposal.status = "cancelled";
+      await proposal.save();
+      return res.status(400).json({ error: "Meet proposal expired. Please request scheduling again." });
+    }
+    if (!confirm) {
+      proposal.status = "cancelled";
+      await proposal.save();
+      // Clear pending meet draft state
+      await User.findByIdAndUpdate(userId, {
+        $set: { googleMeetDraftState: { active: false, wantsAll: false, pendingContactIds: [], stage: null } }
+      });
+      return res.json({ cancelled: true });
+    }
+
+    const user = await User.findById(userId);
+
+    // Support both old single-contact and new multi-contact proposals
+    const contactIdList = Array.isArray(proposal.contactIds) && proposal.contactIds.length > 0
+      ? proposal.contactIds
+      : proposal.contactId
+      ? [proposal.contactId]
+      : [];
+
+    if (!contactIdList.length) return res.status(404).json({ error: "No contacts found on this proposal." });
+
+    const meetContacts = await Contact.find({ _id: { $in: contactIdList }, userId }).lean();
+    if (!meetContacts.length) return res.status(404).json({ error: "Selected contacts not found." });
+
+    const googleAccessToken = await getValidGoogleAccessToken(user);
+    const attendeeEmails = meetContacts.map((c) => c.email).filter(Boolean);
+    const contactNameList = meetContacts.map((c) => c.name).join(", ");
+    const tz = proposal.timezone || clientTimezone || user.timezone || "UTC";
+
+    // Schedule ONE Google Meet event with ALL contacts as attendees.
+    // Google Calendar will send calendar invites to all attendees automatically.
+    const event = await createGoogleMeetAtDateTime({
+      accessToken: googleAccessToken,
+      calendarId: user.integrations?.googleCalendar?.calendarId || "primary",
+      timezone: tz,
+      startAt: proposal.startAt,
+      endAt: proposal.endAt,
+      attendeeEmails,
+      summary: "Dispatcher.AI Support Meet",
+      description: `Meeting scheduled by ${user.name} using Dispatcher.AI\nAttendees: ${contactNameList}`
+    });
+
+    if (!event.created) {
+      return res.status(400).json({
+        error: event.reason || "Meet scheduling failed.",
+        details: event
+      });
+    }
+
+    const meetLink = event.meetLink || event.htmlLink;
+    const startStr = new Date(proposal.startAt).toLocaleString("en-US", { timeZone: tz });
+    const endStr = new Date(proposal.endAt).toLocaleString("en-US", { timeZone: tz });
+
+    // Send individual confirmation email to each contact + the user
+    const emailResults = await Promise.allSettled([
+      // Notify the user
+      sendGmailMessage({
+        accessToken: googleAccessToken,
+        toEmails: [user.email],
+        subject: "Google Meet Scheduled — Dispatcher.AI",
+        body: `Your Google Meet has been scheduled.\n\nAttendees: ${contactNameList}\nStart: ${startStr}\nEnd: ${endStr}\nMeet Link: ${meetLink}\n\nCalendar invites have been sent to all attendees.`
+      }),
+      // Notify each contact individually
+      ...meetContacts.map((contact) =>
+        sendGmailMessage({
+          accessToken: googleAccessToken,
+          toEmails: [contact.email],
+          subject: `Google Meet Invitation from ${user.name} — Dispatcher.AI`,
+          body: `Hi ${contact.name},\n\n${user.name} has scheduled a Google Meet with you.\n\nStart: ${startStr}\nEnd: ${endStr}\nMeet Link: ${meetLink}\n\nThis event has been added to your Google Calendar.\n\nSee you there!`
+        })
+      )
+    ]);
+
+    const emailsSent = emailResults.filter((r) => r.status === "fulfilled").length;
+    const emailsFailed = emailResults.filter((r) => r.status === "rejected").length;
+
+    proposal.status = "confirmed";
+    await proposal.save();
+
+    res.json({
+      confirmed: true,
+      event,
+      attendees: meetContacts.map((c) => ({ id: c._id, name: c.name, email: c.email })),
+      meetLink,
+      emailsSent,
+      emailsFailed,
+      confirmationEmail: emailResults[0]?.value || null
+    });
+  } catch (err) {
+    next(err);
+  }
+});
+
+router.post("/prepare-dispatch", async (req, res, next) => {
+  try {
+    const userId = req.user._id;
+    const { mode, selectedContacts, message } = req.body || {};
+    const selectedIds = Array.isArray(selectedContacts)
+      ? selectedContacts.map((x) => String(x || "").trim()).filter(Boolean)
+      : [];
+    const effectiveMode = String(mode || "").trim().toLowerCase();
+    const rawMessage = String(message || "").trim();
+    if (!effectiveMode) return res.status(400).json({ error: "mode is required." });
+    if (!selectedIds.length) return res.status(400).json({ error: "selectedContacts is required." });
+    if (!rawMessage) return res.status(400).json({ error: "message is required." });
+
+    const user = await User.findById(userId);
+
+    if (["general_mail", "physical_mail", "telegram_message", "voice_call", "google_meet"].includes(effectiveMode)) {
+      const contacts = await Contact.find({ _id: { $in: selectedIds }, userId }).lean();
+      if (!contacts.length) return res.status(404).json({ error: "No selected contacts found." });
+      const recipientLabel = contacts.map((c) => c.name).join(", ");
+      const previewContact = contacts[0];
+      const rewritten = await rewriteDispatchMessage({
+        mode: effectiveMode,
+        userName: user.name,
+        recipientLabel,
+        recipientName: previewContact?.name || "",
+        recipientType: previewContact?.type || "",
+        context: rawMessage
+      });
+
+      if (effectiveMode === "general_mail" || effectiveMode === "physical_mail") {
+        return res.json({
+          prepared: true,
+          mode: effectiveMode,
+          emailDraft: {
+            subject: String(rewritten.subject || "Update"),
+            body: String(rewritten.text || rawMessage)
+          },
+          selectedContacts: contacts.map((c) => ({ id: c._id, name: c.name, email: c.email }))
+        });
+      }
+
+      if (effectiveMode === "telegram_message") {
+        return res.json({
+          prepared: true,
+          mode: effectiveMode,
+          telegramDraft: {
+            text: String(rewritten.text || rawMessage)
+          },
+          selectedContacts: contacts.map((c) => ({ id: c._id, name: c.name, telegramChatId: c.telegramChatId || "" }))
+        });
+      }
+
+      if (effectiveMode === "voice_call") {
+        const callTarget = contacts[0];
+        const script = await generateVoiceCallScript({
+          contactName: callTarget.name,
+          contactType: callTarget.type || "unknown",
+          userName: user.name,
+          context: rewritten.text || rawMessage
+        });
+        return res.json({
+          prepared: true,
+          mode: effectiveMode,
+          voiceCallDraft: {
+            text: String(script.script || rewritten.text || rawMessage)
+          },
+          selectedContacts: contacts.map((c) => ({ id: c._id, name: c.name, phone: c.phone || "" }))
+        });
+      }
+
+      if (effectiveMode === "google_meet") {
+        const attendeeEmails = contacts.map((c) => c.email).filter(Boolean);
+        if (!attendeeEmails.length) {
+          return res.status(400).json({ error: "Selected contacts do not have email addresses." });
+        }
+        const accessToken = await getValidGoogleAccessToken(user);
+        if (!accessToken) {
+          return res.status(400).json({
+            error:
+              "Google account is not connected or token is missing. Please connect Google Account and retry."
+          });
+        }
+        const startAt = new Date(Date.now() + 2 * 24 * 60 * 60 * 1000);
+        const endAt = new Date(startAt.getTime() + 30 * 60 * 1000);
+        const tz = user.timezone || "UTC";
+        const event = await createGoogleMeetAtDateTime({
+          accessToken,
+          calendarId: user.integrations?.googleCalendar?.calendarId || "primary",
+          timezone: tz,
+          startAt,
+          endAt,
+          attendeeEmails,
+          summary: "Dispatcher.AI Google Meet Session",
+          description: `Meeting requested by ${user.name} via Dispatcher.AI`
+        });
+        if (!event.created) {
+          return res.status(400).json({ error: event.reason || "Google Meet scheduling failed." });
+        }
+        const meetLink = event.meetLink || event.htmlLink || "";
+        const sendResults = [];
+        for (const contact of contacts) {
+          const personalized = await rewriteDispatchMessage({
+            mode: "google_meet",
+            userName: user.name,
+            recipientLabel: contact.name,
+            recipientName: contact.name,
+            recipientType: contact.type || "",
+            context: rawMessage
+          });
+          const subject = personalized.subject || rewritten.subject || "Google Meet Invitation";
+          const body = `${String(personalized.text || rewritten.text || rawMessage)}\n\nGoogle Meet link: ${meetLink}`;
+          const sent = await sendGmailMessage({
+            accessToken,
+            toEmails: [contact.email],
+            subject,
+            body
+          });
+          sendResults.push({
+            contactId: contact._id,
+            contactName: contact.name,
+            sent: Boolean(sent?.sent),
+            reason: sent?.reason || ""
+          });
+        }
+        const sentCount = sendResults.filter((x) => x.sent).length;
+        return res.json({
+          prepared: true,
+          mode: effectiveMode,
+          sentGoogleMeetInvite: {
+            sent: sentCount > 0,
+            sentCount,
+            total: sendResults.length,
+            reason: sentCount > 0 ? "" : sendResults[0]?.reason || "",
+            meetLink,
+            attendees: contacts.map((c) => ({ id: c._id, name: c.name, email: c.email })),
+            results: sendResults
+          }
+        });
+      }
+    }
+
+    if (effectiveMode === "discord_message") {
+      const channels = await DiscordChannel.find({ _id: { $in: selectedIds }, userId }).lean();
+      if (!channels.length) return res.status(404).json({ error: "No selected Discord channels found." });
+      const recipientLabel = channels.map((c) => c.name).join(", ");
+      const rewritten = await rewriteDispatchMessage({
+        mode: effectiveMode,
+        userName: user.name,
+        recipientLabel,
+        recipientName: channels[0]?.name || "",
+        recipientType: "discord_channel",
+        context: rawMessage
+      });
+      return res.json({
+        prepared: true,
+        mode: effectiveMode,
+        discordDraft: {
+          text: String(rewritten.text || rawMessage)
+        },
+        selectedChannels: channels.map((c) => ({ id: c._id, name: c.name }))
+      });
+    }
+
+    return res.status(400).json({ error: "Unsupported mode for draft preparation." });
+  } catch (err) {
+    next(err);
+  }
+});
+
+router.post("/dispatch", async (req, res, next) => {
+  try {
+    const userId = req.user._id;
+    const { mode, selectedContacts, draftedMessage, subject, body } = req.body || {};
+    const selectedIds = Array.isArray(selectedContacts)
+      ? selectedContacts.map((x) => String(x || "").trim()).filter(Boolean)
+      : [];
+    const effectiveMode = String(mode || "").trim().toLowerCase();
+    const messageText = String(draftedMessage || "").trim();
+    if (!selectedIds.length) {
+      return res.status(400).json({ error: "selectedContacts is required." });
+    }
+    if (!effectiveMode) {
+      return res.status(400).json({ error: "mode is required." });
+    }
+
+    if (effectiveMode === "general_mail" || effectiveMode === "physical_mail") {
+      const selected = await Contact.find({ _id: { $in: selectedIds }, userId }).lean();
+      if (!selected.length) return res.status(404).json({ error: "No selected contacts found." });
+      const toContacts = selected.filter((c) => Boolean(c.email));
+      if (!toContacts.length) return res.status(400).json({ error: "Selected contacts have no email addresses." });
+      const parsedSubject = String(subject || "").trim();
+      const parsedBody = String(body || "").trim();
+      if (!parsedSubject || !parsedBody) {
+        return res.status(400).json({ error: "subject and body are required for email dispatch." });
+      }
+      const user = await User.findById(userId);
+      let googleAccessToken = await getValidGoogleAccessToken(user);
+      if (!googleAccessToken) {
+        return res.json({
+          dispatched: {
+            sent: false,
+            sentCount: 0,
+            total: toContacts.length,
+            reason:
+              "Google account is not connected or token is missing. Please connect Google Account and retry."
+          }
+        });
+      }
+      const sendResults = [];
+      for (const contact of toContacts) {
+        const rewritten = await rewriteDispatchMessage({
+          mode: effectiveMode,
+          userName: user.name,
+          recipientLabel: contact.name,
+          recipientName: contact.name,
+          recipientType: contact.type || "",
+          context: parsedBody
+        });
+        let sent = await sendGmailMessage({
+          accessToken: googleAccessToken,
+          toEmails: [contact.email],
+          subject: String(rewritten.subject || parsedSubject || "Update"),
+          body: String(rewritten.text || parsedBody)
+        });
+        if (!sent?.sent && String(sent?.reason || "").includes("Gmail API error 401")) {
+          const freshUser = await User.findById(userId);
+          const refreshedAccessToken = await getValidGoogleAccessToken(freshUser, { forceRefresh: true });
+          if (refreshedAccessToken) {
+            sent = await sendGmailMessage({
+              accessToken: refreshedAccessToken,
+              toEmails: [contact.email],
+              subject: String(rewritten.subject || parsedSubject || "Update"),
+              body: String(rewritten.text || parsedBody)
+            });
+          }
+        }
+        sendResults.push({
+          contactId: contact._id,
+          contactName: contact.name,
+          sent: Boolean(sent?.sent),
+          reason: sent?.reason || ""
+        });
+      }
+      const sentCount = sendResults.filter((x) => x.sent).length;
+      return res.json({
+        dispatched: {
+          sent: sentCount > 0,
+          sentCount,
+          total: sendResults.length,
+          results: sendResults,
+          reason: sentCount > 0 ? "" : sendResults[0]?.reason || ""
+        }
+      });
+    }
+
+    if (effectiveMode === "telegram_message") {
+      if (!messageText) return res.status(400).json({ error: "draftedMessage is required for Telegram dispatch." });
+      const contacts = await Contact.find({ _id: { $in: selectedIds }, userId }).lean();
+      if (!contacts.length) return res.status(404).json({ error: "No selected contacts found." });
+      const reachable = contacts.filter((c) => Boolean(c.telegramChatId));
+      if (!reachable.length) return res.status(400).json({ error: "Selected contacts do not have Telegram Chat IDs." });
+      const user = await User.findById(userId);
+      const userName = user?.name || "The user";
+      const results = [];
+      for (const contact of reachable) {
+        const rewritten = await rewriteDispatchMessage({
+          mode: "telegram_message",
+          userName,
+          recipientLabel: contact.name,
+          recipientName: contact.name,
+          recipientType: contact.type || "",
+          context: messageText
+        });
+        const finalText = String(rewritten.text || messageText);
+        const sent = await sendTelegramMessage({
+          chatId: contact.telegramChatId || "",
+          text: finalText
+        });
+        results.push({ contactId: contact._id, contactName: contact.name, ...sent });
+      }
+      const sentCount = results.filter((x) => x.sent).length;
+      return res.json({
+        dispatched: {
+          sent: sentCount > 0,
+          sentCount,
+          total: results.length,
+          results
+        }
+      });
+    }
+
+    if (effectiveMode === "discord_message") {
+      if (!messageText) return res.status(400).json({ error: "draftedMessage is required for Discord dispatch." });
+      const channels = await DiscordChannel.find({ _id: { $in: selectedIds }, userId }).lean();
+      if (!channels.length) return res.status(404).json({ error: "No selected Discord channels found." });
+      const user = await User.findById(userId);
+      const userName = user?.name || "The user";
+      const rewritten = await rewriteDispatchMessage({
+        mode: "discord_message",
+        userName,
+        recipientLabel: channels.map((c) => c.name).join(", "),
+        recipientName: "Discord channel recipients",
+        recipientType: "discord_channel",
+        context: messageText
+      });
+      const results = [];
+      for (const channel of channels) {
+        const finalText = String(rewritten.text || messageText);
+        const sent = await sendDiscordMessage({
+          webhookUrl: channel.webhookUrl || "",
+          text: finalText
+        });
+        results.push({ channelId: channel._id, channelName: channel.name, ...sent });
+      }
+      const sentCount = results.filter((x) => x.sent).length;
+      return res.json({
+        dispatched: {
+          sent: sentCount > 0,
+          sentCount,
+          total: results.length,
+          results
+        }
+      });
+    }
+
+    if (effectiveMode === "voice_call") {
+      if (!messageText) return res.status(400).json({ error: "draftedMessage is required for voice call dispatch." });
+      const contacts = await Contact.find({ _id: { $in: selectedIds }, userId }).lean();
+      if (!contacts.length) return res.status(404).json({ error: "No selected contacts found." });
+      const callable = contacts.filter((c) => String(c.phone || "").trim());
+      if (!callable.length) {
+        return res.status(400).json({ error: "Selected contacts have no phone numbers." });
+      }
+      const user = await User.findById(userId);
+      const results = [];
+      for (const contact of callable) {
+        try {
+          const rewritten = await rewriteDispatchMessage({
+            mode: "voice_call",
+            userName: user.name,
+            recipientLabel: contact.name,
+            recipientName: contact.name,
+            recipientType: contact.type || "",
+            context: messageText
+          });
+          const token = createVoiceRelayToken();
+          const relayCall = await VoiceRelayCall.create({
+            userId,
+            contactId: contact._id,
+            toNumber: String(contact.phone).trim(),
+            message: String(rewritten.text || messageText).trim(),
+            token,
+            status: "queued"
+          });
+          const twilioOut = await startTwilioVoiceCall({
+            toNumber: relayCall.toNumber,
+            relayCallId: relayCall._id,
+            token
+          });
+          await VoiceRelayCall.findByIdAndUpdate(relayCall._id, {
+            $set: {
+              callSid: String(twilioOut?.sid || ""),
+              status: String(twilioOut?.status || "queued")
+            }
+          });
+          results.push({
+            contactId: contact._id,
+            contactName: contact.name,
+            sent: true,
+            callSid: String(twilioOut?.sid || "")
+          });
+        } catch (err) {
+          results.push({
+            contactId: contact._id,
+            contactName: contact.name,
+            sent: false,
+            reason: err?.message || "Voice call failed"
+          });
+        }
+      }
+      const sentCount = results.filter((x) => x.sent).length;
+      return res.json({
+        dispatched: {
+          sent: sentCount > 0,
+          sentCount,
+          total: results.length,
+          results
+        }
+      });
+    }
+
+    return res.status(400).json({
+      error: "Unsupported mode for dispatch."
+    });
+  } catch (err) {
+    next(err);
+  }
+});
+
+router.post("/send-gmail-email", async (req, res, next) => {
+  try {
+    const userId = req.user._id;
+    const { contactIds, subject, body } = req.body;
+    if (!Array.isArray(contactIds) || !contactIds.length) {
+      return res.status(400).json({ error: "contactIds is required." });
+    }
+    if (!String(subject || "").trim() || !String(body || "").trim()) {
+      return res.status(400).json({ error: "subject and body are required." });
+    }
+    const selected = await Contact.find({ _id: { $in: contactIds }, userId }).lean();
+    if (!selected.length) return res.status(404).json({ error: "No selected contacts found." });
+    const toEmails = selected.map((c) => c.email).filter(Boolean);
+    if (!toEmails.length) return res.status(400).json({ error: "Selected contacts have no email addresses." });
+
+    const user = await User.findById(userId);
+    let googleAccessToken = await getValidGoogleAccessToken(user);
+    if (!googleAccessToken) {
+      return res.json({
+        sentEmail: {
+          sent: false,
+          reason:
+            "Google account is not connected or token is missing. Please click 'Connect Google Account' on Dashboard, complete consent, then retry."
+        }
+      });
+    }
+    let sent = await sendGmailMessage({
+      accessToken: googleAccessToken,
+      toEmails,
+      subject: String(subject).trim(),
+      body: String(body).trim()
+    });
+
+    // Auto-recover once on invalid/expired credentials.
+    if (!sent?.sent && String(sent?.reason || "").includes("Gmail API error 401")) {
+      const freshUser = await User.findById(userId);
+      const refreshedAccessToken = await getValidGoogleAccessToken(freshUser, { forceRefresh: true });
+      if (refreshedAccessToken) {
+        sent = await sendGmailMessage({
+          accessToken: refreshedAccessToken,
+          toEmails,
+          subject: String(subject).trim(),
+          body: String(body).trim()
+        });
+      }
+      if (!sent?.sent && String(sent?.reason || "").includes("Gmail API error 401")) {
+        sent = {
+          sent: false,
+          reason:
+            "Google session expired or revoked. Please reconnect Google in Dashboard (Connect Google Account) and try again."
+        };
+      }
+    }
+
+    if (sent?.sent) {
+      await User.findByIdAndUpdate(userId, {
+        $set: {
+          emailDraftState: {
+            active: false,
+            mode: "general_mail",
+            contactIds: [],
+            lastUpdatedAt: new Date()
+          },
+          pendingMultiActionState: {
+            active: false,
+            actions: [],
+            targetScope: null,
+            contactIds: [],
+            channelIds: [],
+            lastUpdatedAt: new Date()
+          }
+        }
+      });
+    }
+
+    res.json({
+      sentEmail: sent
+    });
+  } catch (err) {
+    next(err);
+  }
+});
+
+router.post("/send-telegram-message", async (req, res, next) => {
+  try {
+    const userId = req.user._id;
+    const { contactIds, text } = req.body;
+    if (!Array.isArray(contactIds) || !contactIds.length || !text) {
+      return res.status(400).json({ error: "contactIds and text are required." });
+    }
+    const contacts = await Contact.find({ _id: { $in: contactIds }, userId }).lean();
+    if (!contacts.length) return res.status(404).json({ error: "No selected contacts found." });
+    const reachable = contacts.filter((c) => Boolean(c.telegramChatId));
+    if (!reachable.length) return res.status(400).json({ error: "Selected contacts do not have Telegram Chat IDs." });
+    const user = await User.findById(userId);
+    const userName = user?.name || "The user";
+    const relayBody = String(text || "").trim();
+    const results = [];
+    for (const contact of reachable) {
+      const finalText = `${userName} has shared this message via Wellness Bot for ${contact.name}:\n"${relayBody}"\n\nNote: This is an auto-generated message. Do not reply here; replies will not be delivered.`;
+      const sent = await sendTelegramMessage({
+        chatId: contact.telegramChatId || "",
+        text: finalText
+      });
+      results.push({
+        contactId: contact._id,
+        contactName: contact.name,
+        ...sent
+      });
+    }
+    const sentCount = results.filter((x) => x.sent).length;
+
+    if (sentCount > 0) {
+      await User.findByIdAndUpdate(userId, {
+        $set: {
+          telegramDraftState: {
+            active: false,
+            contactId: null,
+            details: {
+              purpose: "",
+              date: "",
+              time: "",
+              location: "",
+              contactFullName: "",
+              invitees: "",
+              notes: ""
+            },
+            lastUpdatedAt: new Date()
+          },
+          pendingMultiActionState: {
+            active: false,
+            actions: [],
+            targetScope: null,
+            contactIds: [],
+            channelIds: [],
+            lastUpdatedAt: new Date()
+          }
+        }
+      });
+    }
+
+    res.json({
+      sentTelegram: {
+        sent: sentCount > 0,
+        sentCount,
+        total: results.length,
+        results
+      }
+    });
+  } catch (err) {
+    next(err);
+  }
+});
+
+router.post("/send-discord-message", async (req, res, next) => {
+  try {
+    const userId = req.user._id;
+    const { channelIds, text } = req.body;
+    if (!Array.isArray(channelIds) || !channelIds.length || !text) {
+      return res.status(400).json({ error: "channelIds and text are required." });
+    }
+    const channels = await DiscordChannel.find({ _id: { $in: channelIds }, userId }).lean();
+    if (!channels.length) return res.status(404).json({ error: "No selected Discord channels found." });
+    const user = await User.findById(userId);
+    const userName = user?.name || "The user";
+    const relayBody = String(text || "").trim();
+    const results = [];
+    for (const channel of channels) {
+      const finalText = `${userName} has shared this message via Wellness Bot for channel "${channel.name}":\n"${relayBody}"\n\nNote: This is an auto-generated message. Do not reply here; replies will not be delivered.`;
+      const sent = await sendDiscordMessage({
+        webhookUrl: channel.webhookUrl || "",
+        text: finalText
+      });
+      results.push({
+        channelId: channel._id,
+        channelName: channel.name,
+        ...sent
+      });
+    }
+    const sentCount = results.filter((x) => x.sent).length;
+
+    if (sentCount > 0) {
+      await User.findByIdAndUpdate(userId, {
+        $set: {
+          discordDraftState: {
+            active: false,
+            channelId: null,
+            details: {
+              purpose: "",
+              date: "",
+              time: "",
+              location: "",
+              contactFullName: "",
+              invitees: "",
+              notes: ""
+            },
+            lastUpdatedAt: new Date()
+          },
+          pendingMultiActionState: {
+            active: false,
+            actions: [],
+            targetScope: null,
+            contactIds: [],
+            channelIds: [],
+            lastUpdatedAt: new Date()
+          }
+        }
+      });
+    }
+
+    res.json({
+      sentDiscord: {
+        sent: sentCount > 0,
+        sentCount,
+        total: results.length,
+        results
+      }
+    });
+  } catch (err) {
+    next(err);
+  }
+});
+
+router.post("/start-voice-call", async (req, res, next) => {
+  try {
+    const userId = req.user._id;
+    const { contactId, text } = req.body;
+    if (!contactId || !String(text || "").trim()) {
+      return res.status(400).json({ error: "contactId and text are required." });
+    }
+
+    const contact = await Contact.findOne({ _id: contactId, userId }).lean();
+    if (!contact) return res.status(404).json({ error: "Contact not found." });
+    if (!String(contact.phone || "").trim()) {
+      return res.status(400).json({ error: "Contact phone is missing. Add phone number in Dashboard first." });
+    }
+
+    const token = createVoiceRelayToken();
+    const relayCall = await VoiceRelayCall.create({
+      userId,
+      contactId: contact._id,
+      toNumber: String(contact.phone).trim(),
+      message: String(text).trim(),
+      token,
+      status: "queued"
+    });
+
+    const twilioOut = await startTwilioVoiceCall({
+      toNumber: relayCall.toNumber,
+      relayCallId: relayCall._id,
+      token
+    });
+
+    await VoiceRelayCall.findByIdAndUpdate(relayCall._id, {
+      $set: {
+        callSid: String(twilioOut?.sid || ""),
+        status: String(twilioOut?.status || "queued")
+      }
+    });
+    await User.findByIdAndUpdate(userId, {
+      $set: {
+        "voiceCallDraftState.active": false,
+        "voiceCallDraftState.contactId": null,
+        "voiceCallDraftState.lastUpdatedAt": new Date(),
+        "pendingMultiActionState.active": false,
+        "pendingMultiActionState.actions": []
+      }
+    });
+
+    res.json({
+      voiceCall: {
+        started: true,
+        relayCallId: relayCall._id,
+        callSid: String(twilioOut?.sid || ""),
+        status: String(twilioOut?.status || "queued"),
+        contact: {
+          id: contact._id,
+          name: contact.name,
+          phone: contact.phone
+        }
+      }
+    });
+  } catch (err) {
+    next(err);
+  }
+});
+
+export default router;
+

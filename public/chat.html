@@ -1,0 +1,196 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Dispatcher.AI Chat</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;700;800&display=swap" rel="stylesheet" />
+    <link rel="stylesheet" href="/ui.css" />
+  </head>
+  <body>
+    <main class="shell">
+      <nav class="site-nav">
+        <div class="site-brand">Dispatcher.AI</div>
+        <div class="site-links">
+          <a class="site-link" href="/dashboard">Dashboard</a>
+          <a class="site-link active" href="/chat">Companion Chat</a>
+          <a class="site-link" href="/escalation">Escalation Hub</a>
+          <button id="changePasswordBtn" class="site-link">Change Password</button>
+          <button id="logoutBtn" class="site-link">Logout</button>
+        </div>
+      </nav>
+      <header class="top">
+        <div>
+          <h1>Companion Chat</h1>
+          <p class="muted">Stress/depression support, outreach drafts, and meeting actions</p>
+        </div>
+        <div class="row">
+          <button id="deleteChatBtn" class="ghost" type="button">Delete Entire Chat</button>
+        </div>
+      </header>
+      <section class="layout">
+        <section class="panel stack">
+          <div id="chatLog" class="chat-window"></div>
+          <div class="chat-ready-row">
+            <span class="chat-ready-dot" aria-hidden="true"></span>
+            <span class="chat-ready-text">Chat Ready</span>
+            <div class="mode-select-wrap">
+              <select id="modeSelect" class="mode-select" aria-label="Companion mode">
+                <option value="support_chat">General Companion</option>
+                <option value="general_mail">Send Email</option>
+                <option value="telegram_message">Send Telegram Message</option>
+                <option value="discord_message">Send Message on Discord</option>
+                <option value="voice_call">Voice Call</option>
+                <option value="google_meet">Schedule Google Meet</option>
+              </select>
+              <span class="mode-select-arrow" aria-hidden="true">▼</span>
+            </div>
+            <span id="queueBadge" class="queue-badge" style="display: none">Queued (0)</span>
+          </div>
+          <div class="chat-input-wrap">
+            <textarea id="message" rows="1" placeholder="Tell me what is going on..."></textarea>
+            <button id="sendBtn" class="send-icon-btn" aria-label="Send message" title="Send">
+              <span aria-hidden="true">➤</span>
+            </button>
+          </div>
+        </section>
+        <aside class="panel stack">
+          <h3>Agent Actions</h3>
+          <p id="tips" class="muted">No tips yet.</p>
+          <button id="openSnapshotBtn" class="ghost snapshot-open-btn" type="button">Conversation Snapshot</button>
+          <div class="panel-soft">
+            <label>Drafted Outreach Email</label>
+            <textarea id="emailDraft" rows="5"></textarea>
+            <button id="sendEmailBtn" class="ghost" style="display: none">Send Email</button>
+          </div>
+          <div class="panel-soft">
+            <h3>Draft Hub</h3>
+            <div class="draft-tabs" role="tablist" aria-label="Draft channels">
+              <button class="draft-tab active" data-draft-tab-btn="telegram" role="tab" aria-selected="true">Telegram</button>
+              <button class="draft-tab" data-draft-tab-btn="discord" role="tab" aria-selected="false">Discord</button>
+              <button class="draft-tab" data-draft-tab-btn="voice" role="tab" aria-selected="false">Voice Call</button>
+            </div>
+            <section class="draft-pane active" data-draft-pane="telegram" role="tabpanel">
+              <label>Drafted Telegram Message</label>
+              <textarea id="telegramDraft" rows="8"></textarea>
+              <div class="row">
+                <button id="sendTelegramBtn" class="ghost" style="display: none">Send Telegram</button>
+                <button id="copyTelegramBtn" class="ghost copy-btn" type="button">Copy to Clipboard</button>
+              </div>
+            </section>
+            <section class="draft-pane" data-draft-pane="discord" role="tabpanel">
+              <label>Drafted Discord Message</label>
+              <textarea id="discordDraft" rows="8"></textarea>
+              <div class="row">
+                <button id="sendDiscordBtn" class="ghost" style="display: none">Send Discord</button>
+                <button id="copyDiscordBtn" class="ghost copy-btn" type="button">Copy to Clipboard</button>
+              </div>
+            </section>
+            <section class="draft-pane" data-draft-pane="voice" role="tabpanel">
+              <label>Drafted Voice Call Script</label>
+              <textarea id="voiceCallDraft" rows="8"></textarea>
+              <div class="row">
+                <button id="sendVoiceCallBtn" class="ghost" style="display: none">Start Voice Call</button>
+                <button id="copyVoiceBtn" class="ghost copy-btn" type="button">Copy to Clipboard</button>
+              </div>
+            </section>
+          </div>
+          <div id="choiceBox" style="display: none">
+            <p id="choiceText" class="muted"></p>
+            <div class="choice-grid">
+              <button id="choosePhysicalBtn" class="choice-card" type="button">
+                <span class="choice-title">Send Mail For Physical Meet</span>
+                <span class="choice-desc">Prepares and drafts an email requesting an in-person appointment.</span>
+                <span class="choice-example">Example: "I want to visit my doctor in clinic tomorrow."</span>
+              </button>
+              <button id="chooseGoogleMeetBtn" class="choice-card" type="button">
+                <span class="choice-title">Schedule Google Meet</span>
+                <span class="choice-desc">Asks for exact date/time/year, then proposes and confirms a video meeting.</span>
+                <span class="choice-example">Example: "Book a Google Meet on 2026-03-10 at 18:30."</span>
+              </button>
+              <button id="chooseTelegramBtn" class="choice-card" type="button">
+                <span class="choice-title">Send Telegram Message</span>
+                <span class="choice-desc">Drafts and sends a direct Telegram message to the selected contact via bot.</span>
+                <span class="choice-example">Example: "Message my doctor that I need to talk today."</span>
+              </button>
+              <button id="chooseDiscordBtn" class="choice-card" type="button">
+                <span class="choice-title">Send Discord Message</span>
+                <span class="choice-desc">Drafts and sends a direct Discord message to the selected contact via webhook.</span>
+                <span class="choice-example">Example: "Send my doctor a Discord message that I need to talk today."</span>
+              </button>
+            </div>
+          </div>
+          <div id="meetProposalBox" style="display: none">
+            <p id="meetProposalText" class="muted"></p>
+            <div class="row">
+              <button id="confirmMeetBtn" class="ghost">Confirm Meet</button>
+              <button id="cancelMeetBtn" class="ghost">Cancel</button>
+            </div>
+          </div>
+          <p id="meetStatus" class="muted"></p>
+        </aside>
+      </section>
+      <section id="liveStatusBox" class="live-status">
+        <p data-live-main>Enter details to login or sign up.</p>
+        <p data-live-sub class="muted">Checking live website status...</p>
+      </section>
+    </main>
+    <script type="module" src="/status-widget.js"></script>
+    <script type="module" src="/chat.js"></script>
+
+    <dialog id="snapshotDialog" class="panel">
+      <button id="closeSnapshotDialogX" class="dialog-close" aria-label="Close snapshot dialog" type="button">×</button>
+      <div class="panel-soft chat-snapshot" id="chatSnapshot">
+        <h3>Conversation Snapshot</h3>
+        <div class="chat-kpi-grid">
+          <div class="chat-kpi-card">
+            <span class="chat-kpi-label">Total Messages</span>
+            <strong id="chatKpiTotal" class="chat-kpi-value">0</strong>
+          </div>
+          <div class="chat-kpi-card">
+            <span class="chat-kpi-label">Your Messages</span>
+            <strong id="chatKpiUser" class="chat-kpi-value">0</strong>
+          </div>
+          <div class="chat-kpi-card">
+            <span class="chat-kpi-label">Companion Replies</span>
+            <strong id="chatKpiBot" class="chat-kpi-value">0</strong>
+          </div>
+          <div class="chat-kpi-card">
+            <span class="chat-kpi-label">Priority Alerts</span>
+            <strong id="chatKpiAlerts" class="chat-kpi-value">0</strong>
+          </div>
+        </div>
+        <div class="chat-balance-block">
+          <div class="chat-balance-row">
+            <span>You</span>
+            <span id="chatUserPct">0%</span>
+          </div>
+          <div class="chat-balance-track">
+            <span id="chatUserFill" class="chat-balance-fill user-fill" style="--fill:0%"></span>
+          </div>
+          <div class="chat-balance-row">
+            <span>Companion</span>
+            <span id="chatBotPct">0%</span>
+          </div>
+          <div class="chat-balance-track">
+            <span id="chatBotFill" class="chat-balance-fill bot-fill" style="--fill:0%"></span>
+          </div>
+        </div>
+        <div class="chat-mode-usage">
+          <label>Mode Usage</label>
+          <div id="chatModeUsage" class="chat-mode-chips"></div>
+        </div>
+        <div class="chat-trend">
+          <div class="chat-trend-head">
+            <label>Companion Tone Trend (last replies)</label>
+            <span id="chatToneLabel" class="chat-tone-label">Neutral</span>
+          </div>
+          <div id="chatTrendSpark" class="chat-trend-spark" aria-label="Companion sentiment trend"></div>
+        </div>
+      </div>
+    </dialog>
+  </body>
+</html>
+

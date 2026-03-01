@@ -1,0 +1,140 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Dispatcher.AI Dashboard</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;700;800&display=swap" rel="stylesheet" />
+    <link rel="stylesheet" href="/ui.css" />
+  </head>
+  <body>
+    <main class="shell">
+      <nav class="site-nav">
+        <div class="site-brand">Dispatcher.AI</div>
+        <div class="site-links">
+          <a class="site-link active" href="/dashboard">Dashboard</a>
+          <a class="site-link" href="/chat">Companion Chat</a>
+          <a class="site-link" href="/escalation">Escalation Hub</a>
+          <button id="changePasswordBtn" class="site-link">Change Password</button>
+          <button id="logoutBtn" class="site-link">Logout</button>
+        </div>
+      </nav>
+      <section class="dashboard-bento">
+        <header class="top panel">
+          <div>
+            <h1>Dashboard</h1>
+            <p id="hello" class="muted"></p>
+          </div>
+        </header>
+
+        <section class="panel dashboard-kpi" id="dashboardKpi">
+          <div class="kpi-card">
+            <span class="kpi-label">Trusted Contacts</span>
+            <strong id="kpiContacts" class="kpi-value">0</strong>
+          </div>
+          <div class="kpi-card">
+            <span class="kpi-label">Discord Channels</span>
+            <strong id="kpiDiscord" class="kpi-value">0</strong>
+          </div>
+          <div class="kpi-card">
+            <span class="kpi-label">Crisis-Enabled Destinations</span>
+            <strong id="kpiCrisis" class="kpi-value">0</strong>
+          </div>
+          <div class="kpi-card">
+            <span class="kpi-label">Mood Stability Index</span>
+            <strong id="kpiMood" class="kpi-value">0%</strong>
+          </div>
+        </section>
+
+        <section class="panel stack dashboard-main">
+          <h2>Trusted Contacts</h2>
+          <p class="muted">Add doctor, psychiatrist, family, friends, partner, or custom contact type. These can be used for crisis outreach and meet scheduling.</p>
+          <div class="grid-2">
+            <input id="contactName" placeholder="Contact name" />
+            <input id="contactEmail" placeholder="Contact email" />
+            <input id="contactPhone" placeholder="Phone number for voice call (optional, E.164 preferred)" />
+            <input id="contactTelegram" placeholder="Telegram chat ID (optional)" />
+            <div class="muted" style="grid-column: 1 / -1;">
+              <strong>How to get Telegram Chat ID:</strong><br />
+              1. Ask contact to open Telegram and search <code>@RawDataBot</code>.<br />
+              2. Ask them to send <code>/start</code>. They will get JSON; use <code>message -&gt; chat -&gt; id</code>.<br />
+              3. Ask them to share that ID and enter it above.
+            </div>
+            <select id="contactType">
+              <option value="doctor">Doctor</option>
+              <option value="psychiatrist">Psychiatrist</option>
+              <option value="family">Family</option>
+              <option value="friend">Friend</option>
+              <option value="bf">BF</option>
+              <option value="gf">GF</option>
+              <option value="spouse">Spouse</option>
+              <option value="other">Other</option>
+            </select>
+            <input id="contactTypeCustom" placeholder="Enter custom type (only for Other)" style="display: none;" />
+            <label class="toggle-row"><input id="contactCrisis" type="checkbox" /> <span>Notify on crisis</span></label>
+          </div>
+          <div class="row">
+            <button id="addContactBtn">Add Contact</button>
+          </div>
+          <div id="contactList" class="contacts"></div>
+
+          <h2>Discord Channels (Independent)</h2>
+          <p class="muted">Add Discord webhook channels independently. Chat will ask which channel to use when multiple channels exist.</p>
+          <div class="grid-2">
+            <input id="discordChannelName" placeholder="Channel label (e.g., Study Group)" />
+            <input id="discordChannelWebhook" placeholder="Discord webhook URL" />
+            <label class="toggle-row"><input id="discordChannelCrisis" type="checkbox" /> <span>Notify on crisis</span></label>
+            <div class="muted" style="grid-column: 1 / -1;">
+              <strong>How to get Discord Channel Webhook:</strong><br />
+              1. Open your Discord server channel settings for the target text channel.<br />
+              2. Go to <code>Integrations -&gt; Webhooks</code> and click <code>Create Webhook</code>.<br />
+              3. Choose the channel, then click <code>Copy Webhook URL</code> and paste it above.
+            </div>
+          </div>
+          <div class="row">
+            <button id="addDiscordChannelBtn">Add Discord Channel</button>
+          </div>
+          <div id="discordChannelList" class="contacts"></div>
+        </section>
+
+        <aside class="panel stack dashboard-side">
+          <h2>Insights & Integrations</h2>
+          <p id="googleStatus" class="muted">Google Connected: Unknown</p>
+          <div class="panel-soft">
+            <h3>Daily Mood Report</h3>
+            <p id="dailyReport" class="muted">No daily report yet.</p>
+            <div id="dailyBars" class="mood-bars"></div>
+          </div>
+          <div class="panel-soft">
+            <h3>Weekly Mood Report</h3>
+            <p id="weeklyReport" class="muted">No weekly report yet.</p>
+            <div id="weeklyBars" class="mood-bars"></div>
+          </div>
+          <div class="panel-soft">
+            <h3>Monthly Mood Report</h3>
+            <p id="monthlyReport" class="muted">No monthly report yet.</p>
+            <div id="monthlyBars" class="mood-bars"></div>
+          </div>
+          <button id="genReportsBtn" class="ghost">Generate Daily/Weekly/Monthly Reports</button>
+          <button id="connectGoogleBtn" class="ghost">Connect Google Account</button>
+          <button id="disconnectGoogleBtn" class="ghost">Disconnect Google Account</button>
+          <p class="muted">This enables Gmail draft/send and Google Meet scheduling.</p>
+          <h3>Recent Notifications</h3>
+          <ul id="notifications" class="list"></ul>
+        </aside>
+      </section>
+
+      <section class="dashboard-foot">
+        <section id="liveStatusBox" class="live-status">
+          <p data-live-main>Enter details to login or sign up.</p>
+          <p data-live-sub class="muted">Checking live website status...</p>
+        </section>
+      </section>
+    </main>
+    <script type="module" src="/status-widget.js"></script>
+    <script type="module" src="/dashboard.js"></script>
+  </body>
+</html>
+
