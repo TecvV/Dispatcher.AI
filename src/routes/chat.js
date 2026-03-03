@@ -46,6 +46,12 @@ import { clearMem0UserMemory } from "../services/mem0Service.js";
 import { VoiceRelayCall } from "../models/VoiceRelayCall.js";
 import { createVoiceRelayToken, fetchTwilioCallStatus, startTwilioVoiceCall } from "../services/voiceCallService.js";
 import { maybeExtractVoiceCallIntelligence, normalizeCallStatus } from "../services/voiceIntelligenceService.js";
+import {
+  ensureGuestSession,
+  pushGuestChatMessage,
+  clearGuestChatHistory,
+  upsertGuestReports
+} from "../services/guestSessionStore.js";
 
 const router = Router();
 router.use(requireAuth);
@@ -119,8 +125,32 @@ function buildEmailBodyForContact(contact, commonBody) {
   return `${salutation}\n\n${core}`;
 }
 
+function isGuestRequest(userId, reqUser) {
+  const uid = String(userId || "");
+  const rid = String(reqUser?._id || "");
+  const gid = String(reqUser?.guestId || "");
+  return Boolean(reqUser?.isGuest) || uid.startsWith("guest_") || rid.startsWith("guest_") || gid.startsWith("guest_");
+}
+
+async function safeUserFindById(userId, reqUser) {
+  if (isGuestRequest(userId, reqUser)) return null;
+  return User.findById(userId);
+}
+
+async function safeUserFindByIdAndUpdate(userId, reqUser, ...args) {
+  if (isGuestRequest(userId, reqUser)) return null;
+  return User.findByIdAndUpdate(userId, ...args);
+}
+
 router.get("/history", async (req, res, next) => {
   try {
+    if (isGuestRequest(req.user?._id, req.user)) {
+      const session = ensureGuestSession(req.user.guestId || req.user._id, {
+        name: req.user.name,
+        email: req.user.email
+      });
+      return res.json(session.chatHistory || []);
+    }
     const latest = await ConversationMemory.find({ userId: req.user._id })
       .sort({ createdAt: -1 })
       .limit(1000)
@@ -134,6 +164,24 @@ router.get("/history", async (req, res, next) => {
 router.delete("/history/all", async (req, res, next) => {
   try {
     const userId = req.user._id;
+    if (isGuestRequest(userId, req.user)) {
+      clearGuestChatHistory(req.user.guestId || userId);
+      return res.json({
+        ok: true,
+        deleted: {
+          conversationMemories: 0,
+          checkInTasks: 0,
+          carePackages: 0,
+          insightReports: 0,
+          moodReports: 0,
+          crisisEvents: 0,
+          meetProposals: 0,
+          listenerMatches: 0,
+          mem0Cleared: false
+        },
+        mem0: { ok: true, skipped: true, reason: "guest_session" }
+      });
+    }
     const [
       memoriesResult,
       checkinsResult,
@@ -154,7 +202,7 @@ router.delete("/history/all", async (req, res, next) => {
       ListenerMatch.deleteMany({ userId })
     ]);
 
-    await User.findByIdAndUpdate(userId, {
+    await safeUserFindByIdAndUpdate(userId, req.user, {
       $set: {
         telegramDraftState: {
           active: false,
@@ -232,6 +280,13 @@ router.delete("/history/all", async (req, res, next) => {
 router.post("/message", async (req, res, next) => {
   try {
     const userId = req.user._id;
+    const guestMode = isGuestRequest(userId, req.user);
+    const guestSession = guestMode
+      ? ensureGuestSession(req.user.guestId || userId, {
+          name: req.user.name,
+          email: req.user.email
+        })
+      : null;
     const { message, actionChoice, clientTimezone, referenceText } = req.body;
     if (!message) return res.status(400).json({ error: "message is required" });
     const selectedReferenceText = String(referenceText || "").trim().slice(0, 500);
@@ -242,10 +297,34 @@ router.post("/message", async (req, res, next) => {
     const isStrictServiceModeTurn = Boolean(explicitChoice && explicitChoice !== "support_chat");
     const isModeLockedService = isStrictServiceModeTurn;
 
-    const user = await User.findById(userId);
-    const effectiveTimezone = clientTimezone || user.timezone || "UTC";
-    const contacts = await Contact.find({ userId }).sort({ createdAt: -1 }).limit(20);
-    const discordChannels = await DiscordChannel.find({ userId }).sort({ createdAt: -1 }).limit(30);
+    const user =
+      guestMode
+        ? {
+            _id: userId,
+            name: req.user.name || "Guest User",
+            email: req.user.email || "",
+            timezone: "UTC",
+            preferences: {
+              language: "en",
+              familyGreetingStyle: "auto",
+              ...(guestSession?.user?.preferences || {})
+            },
+            integrations: guestSession?.user?.integrations || {},
+            pendingMultiActionState: guestSession?.user?.pendingMultiActionState || null,
+            emailDraftState: guestSession?.user?.emailDraftState || { active: false, mode: "general_mail", contactIds: [] },
+            telegramDraftState: guestSession?.user?.telegramDraftState || { active: false, contactId: null },
+            discordDraftState: guestSession?.user?.discordDraftState || { active: false, channelId: null },
+            voiceCallDraftState: guestSession?.user?.voiceCallDraftState || { active: false, contactId: null },
+            googleMeetDraftState: guestSession?.user?.googleMeetDraftState || { active: false, stage: null }
+          }
+        : await safeUserFindById(userId, req.user);
+    const effectiveTimezone = clientTimezone || user?.timezone || "UTC";
+    const contacts = guestMode
+      ? [...(guestSession?.contacts || [])]
+      : await Contact.find({ userId }).sort({ createdAt: -1 }).limit(20);
+    const discordChannels = guestMode
+      ? [...(guestSession?.discordChannels || [])]
+      : await DiscordChannel.find({ userId }).sort({ createdAt: -1 }).limit(30);
     const professional = null;
     const selectedContactId = req.body.selectedContactId || "";
     const selectedContact = selectedContactId
@@ -254,6 +333,10 @@ router.post("/message", async (req, res, next) => {
 
     const recentForIntent = isStrictServiceModeTurn
       ? []
+      : guestMode
+      ? (guestSession?.chatHistory || [])
+          .filter((m) => String(m.mode || "companion") === "companion" || !Object.prototype.hasOwnProperty.call(m, "mode"))
+          .slice(-12)
       : await ConversationMemory.find({
           userId,
           $or: [{ mode: "companion" }, { mode: { $exists: false } }]
@@ -356,7 +439,7 @@ router.post("/message", async (req, res, next) => {
       const classifierCancelWithoutContent =
         control?.action === "cancel" && !Boolean(sufficiencyForPending?.sufficient);
       if (explicitCancel || classifierCancelWithoutContent) {
-        await User.findByIdAndUpdate(userId, {
+        await safeUserFindByIdAndUpdate(userId, req.user, {
           $set: {
             "emailDraftState.active": false,
             "emailDraftState.contactIds": [],
@@ -384,7 +467,7 @@ router.post("/message", async (req, res, next) => {
 
     // If it's a genuine chat message with pending state → clear all pending state.
     if (isGenuineChat && hasPendingClarification) {
-      await User.findByIdAndUpdate(userId, {
+      await safeUserFindByIdAndUpdate(userId, req.user, {
         $set: {
           "emailDraftState.active": false,
           "emailDraftState.contactIds": [],
@@ -696,7 +779,7 @@ router.post("/message", async (req, res, next) => {
           staleClearUpdates["pendingMultiActionState.channelIds"] = [];
         }
         if (Object.keys(staleClearUpdates).length > 0) {
-          await User.findByIdAndUpdate(userId, { $set: staleClearUpdates });
+          await safeUserFindByIdAndUpdate(userId, req.user, { $set: staleClearUpdates });
         }
       } else if (!requestedIntent && isGenuineChat && !isModeLockedService) {
         forcedIntent = "";
@@ -793,17 +876,19 @@ router.post("/message", async (req, res, next) => {
     }
 
     // ── STEP 8: Save user memory ──
-    const userMemory = await ConversationMemory.create({
-      userId,
-      role: "user",
-      mode: isCompanionModeTurn ? "companion" : "service",
-      text: message,
-      tags: needs,
-      sentimentScore: routing.confidence ?? 0,
-      emotion: userEmotion
-    });
+    const userMemory = guestMode
+      ? pushGuestChatMessage(req.user.guestId || userId, "user", message, isCompanionModeTurn ? "companion" : "service")
+      : await ConversationMemory.create({
+          userId,
+          role: "user",
+          mode: isCompanionModeTurn ? "companion" : "service",
+          text: message,
+          tags: needs,
+          sentimentScore: routing.confidence ?? 0,
+          emotion: userEmotion
+        });
 
-    const [checkInTask, carePackage] = isCompanionModeTurn
+    const [checkInTask, carePackage] = isCompanionModeTurn && !guestMode
       ? await Promise.all([
           maybeScheduleCheckIn({ userId, triggerMemoryId: userMemory._id, message }),
           upsertDailyCarePackage({ userId, needs, reason: "Detected conversation needs" })
@@ -811,7 +896,7 @@ router.post("/message", async (req, res, next) => {
       : [null, null];
 
     let listenerMatch = null;
-    if (routing.asks_human && isCompanionModeTurn) {
+    if (routing.asks_human && isCompanionModeTurn && !guestMode) {
       listenerMatch = await matchListener({
         userId,
         message,
@@ -886,11 +971,11 @@ router.post("/message", async (req, res, next) => {
         staleDraftUpdates["voiceCallDraftState.contactId"] = null;
       }
       if (Object.keys(staleDraftUpdates).length > 0) {
-        await User.findByIdAndUpdate(userId, { $set: staleDraftUpdates });
+        await safeUserFindByIdAndUpdate(userId, req.user, { $set: staleDraftUpdates });
       }
     }
     if (user.pendingMultiActionState?.active && !isMultiActionRequest) {
-      await User.findByIdAndUpdate(userId, {
+      await safeUserFindByIdAndUpdate(userId, req.user, {
         $set: {
           "pendingMultiActionState.active": false,
           "pendingMultiActionState.actions": [],
@@ -1222,7 +1307,7 @@ router.post("/message", async (req, res, next) => {
           emailSendReady = true;
         }
       }
-      await User.findByIdAndUpdate(userId, {
+      await safeUserFindByIdAndUpdate(userId, req.user, {
         $set: {
           emailDraftState: {
             // active=true only while awaiting clarification, NOT when send-ready.
@@ -1333,7 +1418,7 @@ router.post("/message", async (req, res, next) => {
           telegramSendReady = true;
         }
         // Persist state: active only while awaiting clarification, NOT when send-ready
-        await User.findByIdAndUpdate(userId, {
+        await safeUserFindByIdAndUpdate(userId, req.user, {
           $set: {
             telegramDraftState: {
               active: Boolean(telegramClarification),
@@ -1450,7 +1535,7 @@ router.post("/message", async (req, res, next) => {
           discordSendReady = true;
         }
         // Persist state: active only while awaiting clarification, NOT when send-ready
-        await User.findByIdAndUpdate(userId, {
+        await safeUserFindByIdAndUpdate(userId, req.user, {
           $set: {
             discordDraftState: {
               active: Boolean(discordClarification),
@@ -1529,7 +1614,7 @@ router.post("/message", async (req, res, next) => {
           voiceCallAgentMessage = "I am preparing the voice call script now.";
         }
       }
-      await User.findByIdAndUpdate(userId, {
+      await safeUserFindByIdAndUpdate(userId, req.user, {
         $set: {
           voiceCallDraftState: {
             active: Boolean(voiceCallClarification),
@@ -1580,7 +1665,7 @@ router.post("/message", async (req, res, next) => {
     if (!blockOperationalDrafting && !historyReply && !dataQueryReply && hasMultiplePlannedActions && isOperationalIntent) {
       if (!effectivePayload) {
         // multiActionClarification is already set above. Now persist the pending state.
-        await User.findByIdAndUpdate(userId, {
+        await safeUserFindByIdAndUpdate(userId, req.user, {
           $set: {
             pendingMultiActionState: {
               active: true,
@@ -1594,7 +1679,7 @@ router.post("/message", async (req, res, next) => {
         });
       } else if (pendingMulti?.active) {
         // Payload arrived — clear the pending state now that we have the message
-        await User.findByIdAndUpdate(userId, {
+        await safeUserFindByIdAndUpdate(userId, req.user, {
           $set: {
             "pendingMultiActionState.active": false,
             "pendingMultiActionState.actions": []
@@ -1603,7 +1688,7 @@ router.post("/message", async (req, res, next) => {
       }
     } else if (pendingMulti?.active && effectivePayload) {
       // Payload arrived for a previously persisted multi-action — clear it
-      await User.findByIdAndUpdate(userId, {
+      await safeUserFindByIdAndUpdate(userId, req.user, {
         $set: {
           "pendingMultiActionState.active": false,
           "pendingMultiActionState.actions": []
@@ -1676,7 +1761,7 @@ router.post("/message", async (req, res, next) => {
           ? `Who should I schedule the meet with? You can say "all of them" or name specific contacts. Available: ${names.join(", ")}.`
           : "Please add contacts first, then I can schedule a Google Meet.";
         // Persist pending meet state so follow-up turns restore the flow
-        await User.findByIdAndUpdate(userId, {
+        await safeUserFindByIdAndUpdate(userId, req.user, {
           $set: {
             googleMeetDraftState: {
                 active: true,
@@ -1707,7 +1792,7 @@ router.post("/message", async (req, res, next) => {
           const targetNames = meetTargets.map((c) => c.name).join(", ");
           meetClarification = `I'll schedule a Google Meet with ${targetNames}. Please provide the exact date, time, and year (e.g. "March 15 2026 at 3:00 PM").`;
           // Persist pending meet state with resolved contacts so next turn (with date) resumes correctly
-          await User.findByIdAndUpdate(userId, {
+          await safeUserFindByIdAndUpdate(userId, req.user, {
             $set: {
               googleMeetDraftState: {
                 active: true,
@@ -1741,7 +1826,7 @@ router.post("/message", async (req, res, next) => {
             askConfirmation: true
           };
           // Clear the pending meet state — flow is complete
-          await User.findByIdAndUpdate(userId, {
+          await safeUserFindByIdAndUpdate(userId, req.user, {
             $set: {
               googleMeetDraftState: {
                 active: false,
@@ -1780,7 +1865,7 @@ router.post("/message", async (req, res, next) => {
     const crisis = graphOut.crisisResult;
     const crisisAction = graphOut.crisisDecision?.action || "none";
     if (crisisAction === "request_confirmation") {
-      await User.findByIdAndUpdate(userId, {
+      await safeUserFindByIdAndUpdate(userId, req.user, {
         $set: {
           crisisGuard: {
             awaitingConfirmation: true,
@@ -1791,7 +1876,7 @@ router.post("/message", async (req, res, next) => {
         }
       });
     } else if (crisisAction === "trigger_alert" || crisisAction === "cancel_alert") {
-      await User.findByIdAndUpdate(userId, {
+      await safeUserFindByIdAndUpdate(userId, req.user, {
         $set: {
           crisisGuard: {
             awaitingConfirmation: false,
@@ -1887,17 +1972,23 @@ router.post("/message", async (req, res, next) => {
     if (!String(reply || "").trim()) {
       reply = "I am here with you. Please rephrase once and I will help.";
     }
-    await ConversationMemory.create({
-      userId,
-      role: "assistant",
-      mode: isCompanionModeTurn ? "companion" : "service",
-      text: reply,
-      tags: needs,
-      sentimentScore: 0,
-      emotion: "supportive"
-    });
+    if (guestMode) {
+      pushGuestChatMessage(req.user.guestId || userId, "assistant", reply, isCompanionModeTurn ? "companion" : "service");
+    } else {
+      await ConversationMemory.create({
+        userId,
+        role: "assistant",
+        mode: isCompanionModeTurn ? "companion" : "service",
+        text: reply,
+        tags: needs,
+        sentimentScore: 0,
+        emotion: "supportive"
+      });
+    }
 
-    const reports = await generateReportsForUser(userId);
+    const reports = guestMode
+      ? upsertGuestReports(req.user.guestId || userId, guestSession?.reports || { daily: null, weekly: null, monthly: null })
+      : await generateReportsForUser(userId);
 
     const meetSuggestion =
       resolvedIntent === "support_chat" && isDistressed && contacts.length
@@ -2000,7 +2091,7 @@ router.post("/schedule-meet", async (req, res, next) => {
   try {
     const userId = req.user._id;
     const { contactId, when } = req.body;
-    const user = await User.findById(userId);
+    const user = await safeUserFindById(userId, req.user);
     const contact = await Contact.findOne({ _id: contactId, userId });
     if (!contact) return res.status(404).json({ error: "Contact not found." });
     const googleAccessToken = await getValidGoogleAccessToken(user);
@@ -2033,13 +2124,13 @@ router.post("/confirm-meet", async (req, res, next) => {
       proposal.status = "cancelled";
       await proposal.save();
       // Clear pending meet draft state
-      await User.findByIdAndUpdate(userId, {
+      await safeUserFindByIdAndUpdate(userId, req.user, {
         $set: { googleMeetDraftState: { active: false, wantsAll: false, pendingContactIds: [], stage: null } }
       });
       return res.json({ cancelled: true });
     }
 
-    const user = await User.findById(userId);
+    const user = await safeUserFindById(userId, req.user);
 
     // Support both old single-contact and new multi-contact proposals
     const contactIdList = Array.isArray(proposal.contactIds) && proposal.contactIds.length > 0
@@ -2136,7 +2227,7 @@ router.post("/prepare-dispatch", async (req, res, next) => {
     if (!selectedIds.length) return res.status(400).json({ error: "selectedContacts is required." });
     if (!rawMessage) return res.status(400).json({ error: "message is required." });
 
-    const user = await User.findById(userId);
+    const user = await safeUserFindById(userId, req.user);
 
     if (["general_mail", "physical_mail", "telegram_message", "voice_call", "google_meet"].includes(effectiveMode)) {
       const contacts = await Contact.find({ _id: { $in: selectedIds }, userId }).lean();
@@ -2356,7 +2447,7 @@ router.post("/dispatch", async (req, res, next) => {
       if (!parsedSubject || !parsedBody) {
         return res.status(400).json({ error: "subject and body are required for email dispatch." });
       }
-      const user = await User.findById(userId);
+      const user = await safeUserFindById(userId, req.user);
       let googleAccessToken = await getValidGoogleAccessToken(user);
       if (!googleAccessToken) {
         return res.json({
@@ -2379,7 +2470,7 @@ router.post("/dispatch", async (req, res, next) => {
           attachments: normalizedAttachments
         });
         if (!sent?.sent && String(sent?.reason || "").includes("Gmail API error 401")) {
-          const freshUser = await User.findById(userId);
+          const freshUser = await safeUserFindById(userId, req.user);
           const refreshedAccessToken = await getValidGoogleAccessToken(freshUser, { forceRefresh: true });
           if (refreshedAccessToken) {
             sent = await sendGmailMessage({
@@ -2416,7 +2507,7 @@ router.post("/dispatch", async (req, res, next) => {
       if (!contacts.length) return res.status(404).json({ error: "No selected contacts found." });
       const reachable = contacts.filter((c) => Boolean(c.telegramChatId));
       if (!reachable.length) return res.status(400).json({ error: "Selected contacts do not have Telegram Chat IDs." });
-      const user = await User.findById(userId);
+      const user = await safeUserFindById(userId, req.user);
       const results = [];
       for (const contact of reachable) {
         const sent = await sendTelegramMessage({
@@ -2551,7 +2642,7 @@ router.post("/send-gmail-email", async (req, res, next) => {
     const toContacts = selected.filter((c) => Boolean(c.email));
     if (!toContacts.length) return res.status(400).json({ error: "Selected contacts have no email addresses." });
 
-    const user = await User.findById(userId);
+    const user = await safeUserFindById(userId, req.user);
     let googleAccessToken = await getValidGoogleAccessToken(user);
     if (!googleAccessToken) {
       return res.json({
@@ -2574,7 +2665,7 @@ router.post("/send-gmail-email", async (req, res, next) => {
         attachments: normalizedAttachments
       });
       if (!sent?.sent && String(sent?.reason || "").includes("Gmail API error 401")) {
-        const freshUser = await User.findById(userId);
+        const freshUser = await safeUserFindById(userId, req.user);
         const refreshedAccessToken = await getValidGoogleAccessToken(freshUser, { forceRefresh: true });
         if (refreshedAccessToken) {
           googleAccessToken = refreshedAccessToken;
@@ -2605,7 +2696,7 @@ router.post("/send-gmail-email", async (req, res, next) => {
     const sentCount = sendResults.filter((x) => x.sent).length;
 
     if (sentCount > 0) {
-      await User.findByIdAndUpdate(userId, {
+      await safeUserFindByIdAndUpdate(userId, req.user, {
         $set: {
           emailDraftState: {
             active: false,
@@ -2651,7 +2742,7 @@ router.post("/send-telegram-message", async (req, res, next) => {
     if (!contacts.length) return res.status(404).json({ error: "No selected contacts found." });
     const reachable = contacts.filter((c) => Boolean(c.telegramChatId));
     if (!reachable.length) return res.status(400).json({ error: "Selected contacts do not have Telegram Chat IDs." });
-    const user = await User.findById(userId);
+    const user = await safeUserFindById(userId, req.user);
     const rawText = String(text || "").trim();
     const results = [];
     for (const contact of reachable) {
@@ -2669,7 +2760,7 @@ router.post("/send-telegram-message", async (req, res, next) => {
     const sentCount = results.filter((x) => x.sent).length;
 
     if (sentCount > 0) {
-      await User.findByIdAndUpdate(userId, {
+      await safeUserFindByIdAndUpdate(userId, req.user, {
         $set: {
           telegramDraftState: {
             active: false,
@@ -2720,7 +2811,7 @@ router.post("/send-discord-message", async (req, res, next) => {
     }
     const channels = await DiscordChannel.find({ _id: { $in: channelIds }, userId }).lean();
     if (!channels.length) return res.status(404).json({ error: "No selected Discord channels found." });
-    const user = await User.findById(userId);
+    const user = await safeUserFindById(userId, req.user);
     const rawText = String(text || "").trim();
     const results = [];
     for (const channel of channels) {
@@ -2738,7 +2829,7 @@ router.post("/send-discord-message", async (req, res, next) => {
     const sentCount = results.filter((x) => x.sent).length;
 
     if (sentCount > 0) {
-      await User.findByIdAndUpdate(userId, {
+      await safeUserFindByIdAndUpdate(userId, req.user, {
         $set: {
           discordDraftState: {
             active: false,
@@ -2823,7 +2914,7 @@ router.post("/start-voice-call", async (req, res, next) => {
         status: String(twilioOut?.status || "queued")
       }
     });
-    await User.findByIdAndUpdate(userId, {
+    await safeUserFindByIdAndUpdate(userId, req.user, {
       $set: {
         "voiceCallDraftState.active": false,
         "voiceCallDraftState.contactId": null,

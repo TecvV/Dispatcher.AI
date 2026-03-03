@@ -88,6 +88,15 @@ let meetCountdownTimer = null;
 const meetCompletionInProgress = new Set();
 let ratingSubmitInProgress = false;
 let currentWalletBalance = 0;
+let isGuestUser = false;
+
+function guestBlockingMessage(action = "perform this action") {
+  return `Guest demo mode: please create an account first to ${action}.`;
+}
+
+function buildGuestDemoDate(offsetHours = 0) {
+  return new Date(Date.now() + offsetHours * 60 * 60 * 1000).toISOString();
+}
 
 function esc(v) {
   return String(v ?? "")
@@ -111,6 +120,28 @@ function normalizeName(value) {
 function parseApiError(err, fallback) {
   const text = String(err?.message || "");
   return text || fallback;
+}
+
+function applyGuestEscalationMode() {
+  profileHintText.textContent =
+    "Guest demo mode: Escalation analytics shown here are representative. Create an account to apply, open slots, and book sessions.";
+  myProfileText.textContent = "Guest profile (demo): analytics and reports are for representation only.";
+  if (isListeningEnabled) {
+    isListeningEnabled.checked = false;
+    isListeningEnabled.disabled = true;
+  }
+  if (applyListenerBtn) applyListenerBtn.disabled = true;
+  if (editProfileBtn) editProfileBtn.disabled = true;
+  if (viewPerformanceBtn) viewPerformanceBtn.disabled = true;
+  if (openSlotBtn) openSlotBtn.disabled = true;
+  if (walletTopupBtn) walletTopupBtn.disabled = true;
+  if (walletTopupInput) walletTopupInput.disabled = true;
+  if (slotDate) slotDate.disabled = true;
+  if (slotTime) slotTime.disabled = true;
+  if (slotFeeInr) slotFeeInr.disabled = true;
+  if (chatMessageInput) chatMessageInput.disabled = true;
+  if (sendChatMessageBtn) sendChatMessageBtn.disabled = true;
+  if (purgeChatBtn) purgeChatBtn.disabled = true;
 }
 
 function formatQualifications(items, max = 2) {
@@ -803,6 +834,36 @@ function renderOutcomeBars(data) {
 
 function openHubSnapshotDialog() {
   if (!hubSnapshotDialog || !hubSnapshotContent) return;
+  if (isGuestUser) {
+    const demoWallet = 1250;
+    const demoOpenSlots = 3;
+    const demoSpeakUp = 2;
+    const demoListenUp = 1;
+    const demoSpeakDone = 7;
+    const demoListenDone = 6;
+    const demoAvg = 8.9;
+    hubSnapshotContent.innerHTML = `
+      <p class="muted"><strong>Demo data:</strong> Analytics shown below are for representation only in guest mode.</p>
+      <div class="hub-kpi-grid">
+        <div class="hub-kpi-card"><span>Wallet (Rs)</span><strong id="hubKpiWallet">0</strong></div>
+        <div class="hub-kpi-card"><span>Open Slots</span><strong id="hubKpiOpenSlots">0</strong></div>
+        <div class="hub-kpi-card"><span>Upcoming Speaking</span><strong id="hubKpiSpeakUp">0</strong></div>
+        <div class="hub-kpi-card"><span>Upcoming Listening</span><strong id="hubKpiListenUp">0</strong></div>
+        <div class="hub-kpi-card"><span>Completed Speaking</span><strong id="hubKpiSpeakDone">0</strong></div>
+        <div class="hub-kpi-card"><span>Completed Listening</span><strong id="hubKpiListenDone">0</strong></div>
+        <div class="hub-kpi-card"><span>Avg Listener Rating</span><strong id="hubKpiAvg">0.00</strong></div>
+      </div>
+    `;
+    if (typeof hubSnapshotDialog.showModal === "function") hubSnapshotDialog.showModal();
+    animateDialogMetric(document.getElementById("hubKpiWallet"), demoWallet, 620);
+    animateDialogMetric(document.getElementById("hubKpiOpenSlots"), demoOpenSlots, 480);
+    animateDialogMetric(document.getElementById("hubKpiSpeakUp"), demoSpeakUp, 520);
+    animateDialogMetric(document.getElementById("hubKpiListenUp"), demoListenUp, 560);
+    animateDialogMetric(document.getElementById("hubKpiSpeakDone"), demoSpeakDone, 620);
+    animateDialogMetric(document.getElementById("hubKpiListenDone"), demoListenDone, 660);
+    animateDialogMetric(document.getElementById("hubKpiAvg"), demoAvg, 700);
+    return;
+  }
   const nowTs = Date.now();
   const isUpcomingBooking = (b) => {
     const status = String(b?.status || "").toLowerCase();
@@ -838,6 +899,37 @@ function openHubSnapshotDialog() {
 
 function openSessionVisualsDialog() {
   if (!sessionVisualsDialog || !sessionVisualsContent) return;
+  if (isGuestUser) {
+    const statusCount = {
+      open: 4,
+      accepted: 2,
+      pending: 1,
+      completed: 9,
+      cancelled: 2,
+      rejected: 1
+    };
+    const modeCount = { chat: 8, google_meet: 5 };
+    const totalModes = modeCount.chat + modeCount.google_meet;
+    const chatPct = Math.round((modeCount.chat / totalModes) * 100);
+    const meetPct = 100 - chatPct;
+    sessionVisualsContent.innerHTML = `
+      <p class="muted"><strong>Demo data:</strong> Visual analytics shown here are representative in guest mode.</p>
+      <div class="panel-soft">
+        <h4>Booking Outcome Distribution</h4>
+        <div class="ov-grid">${renderOutcomeBars(statusCount)}</div>
+      </div>
+      <div class="panel-soft">
+        <h4>Mode Split</h4>
+        <div class="ov-mode-track">
+          <span class="ov-mode-fill mode-chat" style="--fill:${chatPct}%">Chat ${chatPct}%</span>
+          <span class="ov-mode-fill mode-meet" style="--fill:${meetPct}%">GMeet ${meetPct}%</span>
+        </div>
+        <p class="muted">Chat sessions: ${modeCount.chat} | Google Meet sessions: ${modeCount.google_meet}</p>
+      </div>
+    `;
+    if (typeof sessionVisualsDialog.showModal === "function") sessionVisualsDialog.showModal();
+    return;
+  }
   const nowTs = Date.now();
   const all = [...incomingBookings, ...outgoingBookings];
   const statusCount = {
@@ -912,11 +1004,15 @@ function renderMyOpenSlots() {
 
 function renderListenerMarketplace() {
   listenerMarketplaceBox.innerHTML = "";
+  const guestNote = isGuestUser
+    ? '<p class="muted"><strong>Guest demo:</strong> You can view slots, but booking requires creating an account first.</p>'
+    : "";
   if (!discoverySlots.length) {
-    listenerMarketplaceBox.innerHTML = '<p class="muted">No listener slots available right now.</p>';
+    listenerMarketplaceBox.innerHTML = `${guestNote}<p class="muted">No listener slots available right now.</p>`;
     listenerMarketplaceBox.scrollTop = 0;
     return;
   }
+  if (guestNote) listenerMarketplaceBox.insertAdjacentHTML("beforeend", guestNote);
   for (const s of discoverySlots) {
     const card = document.createElement("div");
     card.className = "contact-item";
@@ -934,7 +1030,7 @@ function renderListenerMarketplace() {
           <option value="chat">Chat</option>
           <option value="google_meet">Google Meet</option>
         </select>
-        <button data-action="book-slot" data-id="${esc(s.slotId)}">Book Slot</button>
+        <button data-action="book-slot" data-id="${esc(s.slotId)}">${isGuestUser ? "Book Slot (Account Required)" : "Book Slot"}</button>
         <button class="ghost" data-action="view-listener-detail" data-id="${esc(s.slotId)}">View Details</button>
       </div>
     `;
@@ -1052,6 +1148,53 @@ function renderChatBookingOptions() {
 }
 
 function renderSessionLists() {
+  if (isGuestUser) {
+    const demoSpeaking = [
+      { listener: "Demo Listener A", mode: "chat", when: buildGuestDemoDate(-6), rating: 8.4 },
+      { listener: "Demo Listener B", mode: "google_meet", when: buildGuestDemoDate(-28), rating: 9.1 }
+    ];
+    const demoListening = [
+      { speaker: "Demo Speaker A", mode: "chat", when: buildGuestDemoDate(-12), rating: 8.8 },
+      { speaker: "Demo Speaker B", mode: "google_meet", when: buildGuestDemoDate(-36), rating: 8.2 }
+    ];
+    speakingSessionsBox.innerHTML = `
+      <p class="muted"><strong>Demo data:</strong> Session history shown for representation only.</p>
+      ${demoSpeaking
+        .map(
+          (s) => `
+          <div class="contact-item">
+            <div class="row">
+              <strong>Listener - ${esc(s.listener)}</strong>
+              <span class="pill">${esc(s.mode)}</span>
+            </div>
+            <div class="muted">Date/Time: ${esc(fmtDateTime(s.when))}</div>
+            <div class="muted">Rating given: ${esc(Number(s.rating).toFixed(2))}</div>
+          </div>
+        `
+        )
+        .join("")}
+    `;
+    listeningSessionsBox.innerHTML = `
+      <p class="muted"><strong>Demo data:</strong> Session history shown for representation only.</p>
+      ${demoListening
+        .map(
+          (s) => `
+          <div class="contact-item">
+            <div class="row">
+              <strong>Speaker - ${esc(s.speaker)}</strong>
+              <span class="pill">${esc(s.mode)}</span>
+            </div>
+            <div class="muted">Date/Time: ${esc(fmtDateTime(s.when))}</div>
+            <div class="muted">Rating received: ${esc(Number(s.rating).toFixed(2))}</div>
+          </div>
+        `
+        )
+        .join("")}
+    `;
+    speakingSessionsBox.scrollTop = 0;
+    listeningSessionsBox.scrollTop = 0;
+    return;
+  }
   const completedSpeaking = outgoingBookings
     .filter((b) => String(b.status) === "completed")
     .sort((a, b) => new Date(b.scheduledAt) - new Date(a.scheduledAt));
@@ -1188,6 +1331,39 @@ function renderSessionLists() {
 }
 
 function renderWellnessLogs(logs) {
+  if (isGuestUser) {
+    const demoLogs = [
+      {
+        listenerName: "Demo Listener A",
+        createdAt: buildGuestDemoDate(-8),
+        summary:
+          "- Listener maintained calm pacing and validated concerns.\n- Suggested two practical next steps.\n- Follow-up check-in recommended within 24 hours."
+      },
+      {
+        listenerName: "Demo Listener B",
+        createdAt: buildGuestDemoDate(-26),
+        summary:
+          "- Conversation stayed solution-focused.\n- Clear reassurance reduced stress in-session.\n- Suggested sleep + hydration routine for the evening."
+      }
+    ];
+    wellnessLogsBox.innerHTML = `
+      <p class="muted"><strong>Demo data:</strong> Wellness logs and AI audit insights shown for representation only in guest mode.</p>
+      ${demoLogs
+        .map(
+          (log) => `
+          <div class="contact-item">
+            <div class="row"><strong>Session Takeaway</strong><span class="pill">${esc(fmtDateTime(log.createdAt))}</span></div>
+            <div class="muted">Listener: ${esc(log.listenerName)}</div>
+            <div class="muted">AI Audit score (listener): ${esc((8 + Math.random()).toFixed(2))}/10</div>
+            <div class="takeaway-list">${renderTakeawayChecklist(log.summary)}</div>
+          </div>
+        `
+        )
+        .join("")}
+    `;
+    wellnessLogsBox.scrollTop = 0;
+    return;
+  }
   wellnessLogsBox.innerHTML = "";
   if (!logs.length) {
     wellnessLogsBox.innerHTML = '<p class="muted">No takeaways yet.</p>';
@@ -1677,11 +1853,17 @@ ratingDialog.addEventListener("close", () => {
 });
 
 if (logoutBtn) {
-  logoutBtn.addEventListener("click", () => {
-    stopChatCountdown();
-    stopMeetCountdown();
-    clearToken();
-    window.location.href = "/login.html";
+  logoutBtn.addEventListener("click", async () => {
+    try {
+      await api("/api/auth/logout", { method: "POST", body: "{}" });
+    } catch {
+      // best-effort logout
+    } finally {
+      stopChatCountdown();
+      stopMeetCountdown();
+      clearToken();
+      window.location.href = "/login.html";
+    }
   });
 }
 
@@ -1797,6 +1979,10 @@ if (cancelProfileBtn) {
 }
 
 applyListenerBtn.addEventListener("click", async () => {
+  if (isGuestUser) {
+    uiStatus("Account required.", guestBlockingMessage("apply as listener"), "error");
+    return;
+  }
   try {
     const interests = interestsInput.value
       .split(/[,\n;]/)
@@ -1819,6 +2005,10 @@ applyListenerBtn.addEventListener("click", async () => {
 });
 
 saveProfileBtn.addEventListener("click", async () => {
+  if (isGuestUser) {
+    uiStatus("Account required.", guestBlockingMessage("edit listener profile"), "error");
+    return;
+  }
   try {
     const interests = profileDialogInterests.value
       .split(/[,\n;]/)
@@ -1843,6 +2033,11 @@ saveProfileBtn.addEventListener("click", async () => {
 
 if (isListeningEnabled) {
   isListeningEnabled.addEventListener("change", async () => {
+    if (isGuestUser) {
+      isListeningEnabled.checked = false;
+      uiStatus("Account required.", guestBlockingMessage("toggle listening availability"), "error");
+      return;
+    }
     try {
       await api("/api/escalation/listener/toggle-listening", {
         method: "PATCH",
@@ -1858,6 +2053,10 @@ if (isListeningEnabled) {
 }
 
 async function handleOpenSlot() {
+  if (isGuestUser) {
+    uiStatus("Account required.", guestBlockingMessage("open a listening slot"), "error");
+    return;
+  }
   try {
     const date = slotDate.value;
     const time = slotTime.value;
@@ -1971,6 +2170,10 @@ listenerMarketplaceBox.addEventListener("click", async (ev) => {
   const id = ev.target?.dataset?.id;
   if (!action || !id) return;
   if (action === "book-slot") {
+    if (isGuestUser) {
+      uiStatus("Account required.", guestBlockingMessage("book a listener slot"), "error");
+      return;
+    }
     try {
       selectSlot(id);
       const modeEl = ev.target.closest(".contact-item")?.querySelector(`select[data-role="book-mode"][data-id="${String(id)}"]`);
@@ -1996,6 +2199,10 @@ listenerMarketplaceBox.addEventListener("click", async (ev) => {
 });
 
 walletTopupBtn.addEventListener("click", async () => {
+  if (isGuestUser) {
+    uiStatus("Account required.", guestBlockingMessage("use wallet features"), "error");
+    return;
+  }
   try {
     const amountInr = Number(walletTopupInput.value || 0);
     if (!Number.isFinite(amountInr) || amountInr <= 0) {
@@ -2017,6 +2224,10 @@ walletTopupBtn.addEventListener("click", async () => {
 });
 
 incomingBookingsBox.addEventListener("click", async (ev) => {
+  if (isGuestUser) {
+    uiStatus("Account required.", guestBlockingMessage("respond to bookings"), "error");
+    return;
+  }
   const action = ev.target?.dataset?.action;
   const id = ev.target?.dataset?.id;
   if (!action || !id) return;
@@ -2050,6 +2261,10 @@ incomingBookingsBox.addEventListener("click", async (ev) => {
 });
 
 outgoingBookingsBox.addEventListener("click", async (ev) => {
+  if (isGuestUser) {
+    uiStatus("Account required.", guestBlockingMessage("manage bookings"), "error");
+    return;
+  }
   const action = ev.target?.dataset?.action;
   const id = ev.target?.dataset?.id;
   if (!action || !id) return;
@@ -2079,6 +2294,10 @@ chatBookingSelect.addEventListener("change", async () => {
 });
 
 sendChatMessageBtn.addEventListener("click", async () => {
+  if (isGuestUser) {
+    uiStatus("Account required.", guestBlockingMessage("use private escalation chat"), "error");
+    return;
+  }
   const bookingId = chatBookingSelect.value;
   const text = chatMessageInput.value.trim();
   if (!bookingId || !text) return;
@@ -2096,6 +2315,10 @@ sendChatMessageBtn.addEventListener("click", async () => {
 });
 
 purgeChatBtn.addEventListener("click", async () => {
+  if (isGuestUser) {
+    uiStatus("Account required.", guestBlockingMessage("purge session chat"), "error");
+    return;
+  }
   const bookingId = chatBookingSelect.value;
   if (!bookingId) return;
   try {
@@ -2110,6 +2333,10 @@ purgeChatBtn.addEventListener("click", async () => {
 });
 
 submitRatingBtn.addEventListener("click", async () => {
+  if (isGuestUser) {
+    uiStatus("Account required.", guestBlockingMessage("submit session ratings"), "error");
+    return;
+  }
   if (!pendingRatingBookingId) {
     uiStatus("No pending session.", "No completed unrated session found.", "error");
     return;
@@ -2235,13 +2462,55 @@ rateTipsQuality.addEventListener("keydown", (event) => {
 (async function init() {
   currentUser = await requireSession();
   if (!currentUser) return;
+  isGuestUser = Boolean(currentUser?.isGuest);
   try {
     const now = new Date();
     slotDate.value = now.toISOString().slice(0, 10);
     slotTime.value = "18:00";
     slotFeeInr.value = "0";
     selectSlot("");
+    if (isGuestUser) {
+      applyGuestEscalationMode();
+      uiStatus(
+        "Guest demo mode active.",
+        "Slot booking and escalation actions require creating an account. Demo analytics are shown for representation.",
+        "info"
+      );
+    }
     uiStatus("Loading Escalation Hub...", "Fetching slots, bookings, and wellness logs.");
+    if (isGuestUser) {
+      try {
+        await loadDiscovery();
+      } catch {
+        discoverySlots = [
+          {
+            slotId: "demo-slot-1",
+            listenerName: "Demo Listener A",
+            freeAvailability: "Premium (Rs 150)",
+            dateTime: buildGuestDemoDate(6),
+            averageRating: "8.9",
+            qualifications: ["Certified active listener", "Conflict support"],
+            interests: ["stress", "work anxiety"]
+          },
+          {
+            slotId: "demo-slot-2",
+            listenerName: "Demo Listener B",
+            freeAvailability: "Free only",
+            dateTime: buildGuestDemoDate(20),
+            averageRating: "8.4",
+            qualifications: ["Peer support", "Mindfulness coach"],
+            interests: ["burnout", "study pressure"]
+          }
+        ];
+        renderListenerMarketplace();
+      }
+      renderBookings();
+      renderChatBookingOptions();
+      renderSessionLists();
+      renderWellnessLogs([]);
+      uiStatus("Escalation Hub ready (guest demo).", "Create an account to book slots or run escalation actions.", "ok");
+      return;
+    }
     await refreshAll();
     await loadChatMessagesForSelected();
     await maybePromptPendingRatingDialog();

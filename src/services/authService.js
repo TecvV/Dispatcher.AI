@@ -23,8 +23,16 @@ export function verifyPassword(password, storedHash) {
 }
 
 export function issueToken(userId) {
+  return issueCustomToken({ sub: String(userId) });
+}
+
+export function issueGuestToken(guestId) {
+  return issueCustomToken({ sub: String(guestId), guest: true });
+}
+
+function issueCustomToken(payloadInput = {}) {
   const payload = {
-    sub: String(userId),
+    ...payloadInput,
     exp: Date.now() + TOKEN_TTL_MS
   };
   const b64 = Buffer.from(JSON.stringify(payload)).toString("base64url");

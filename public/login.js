@@ -10,7 +10,11 @@ const toggleLoginPasswordBtn = document.getElementById("toggleLoginPassword");
 const submitBtn = document.getElementById("submitBtn");
 const googleLoginBtn = document.getElementById("googleLoginBtn");
 const googleSignupBtn = document.getElementById("googleSignupBtn");
+const guestLoginBtn = document.getElementById("guestLoginBtn");
 const forgotPasswordBtn = document.getElementById("forgotPasswordBtn");
+const guestNoticeDialog = document.getElementById("guestNoticeDialog");
+const continueGuestBtn = document.getElementById("continueGuestBtn");
+const closeGuestNoticeX = document.getElementById("closeGuestNoticeX");
 
 let mode = "login";
 const uiStatus = (main, sub = "", tone = "info") => window.setUIStatus?.(main, sub, tone);
@@ -114,6 +118,44 @@ if (googleSignupBtn) {
     } catch (err) {
       uiStatus("Google connect failed.", err.message, "error");
     }
+  });
+}
+
+if (guestLoginBtn) {
+  guestLoginBtn.addEventListener("click", async () => {
+    try {
+      uiStatus("Starting guest session...", "No account required.");
+      const out = await api("/api/auth/guest-login", {
+        method: "POST",
+        body: JSON.stringify({})
+      });
+      setToken(out.token);
+      uiStatus("Guest session ready.", "Please read the demo-mode notice.", "ok");
+      if (guestNoticeDialog && typeof guestNoticeDialog.showModal === "function") {
+        guestNoticeDialog.showModal();
+      } else {
+        window.alert(
+          "Guest Mode (Demo): Your activity is available only during this session and will be deleted after logout."
+        );
+        window.location.href = "/dashboard";
+      }
+    } catch (err) {
+      uiStatus("Guest login failed.", err.message, "error");
+    }
+  });
+}
+
+if (continueGuestBtn) {
+  continueGuestBtn.addEventListener("click", () => {
+    if (guestNoticeDialog?.open) guestNoticeDialog.close();
+    window.location.href = "/dashboard";
+  });
+}
+
+if (closeGuestNoticeX) {
+  closeGuestNoticeX.addEventListener("click", () => {
+    if (guestNoticeDialog?.open) guestNoticeDialog.close();
+    window.location.href = "/dashboard";
   });
 }
 

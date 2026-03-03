@@ -15,15 +15,18 @@
   <body class="login-page">
     <main class="login-split">
       <section class="login-left">
-        <div class="login-brand-block">
-          <div class="hero-logo" aria-label="Dispatcher.AI">Dispatcher.AI</div>
-          <p class="muted login-tagline">Coordinate support, communication, and escalation from one command center.</p>
+        <div class="login-brand-block login-visual-card">
+          <div class="login-left-core">
+            <div class="hero-logo" aria-label="Dispatcher.AI">DISPATCHER.AI</div>
+            <p class="login-left-subtitle">OMNI-CHANNEL RESPONSE RELAY</p>
+            <p class="muted login-left-init">Multi-Agent Platform: From AI Voice Call Assistance to Automated Crisis Detection</p>
+          </div>
         </div>
       </section>
       <section class="login-right">
         <section class="auth-card panel">
-          <h1>Welcome</h1>
-          <p class="muted">Login or create your account to access all pages.</p>
+          <h1>Login/Signup</h1>
+          <p class="muted">Access Dispatcher.AI command center.</p>
           <div class="tabs">
             <button id="tabLogin" class="tab active">Login</button>
             <button id="tabSignup" class="tab ghost">Sign Up</button>
@@ -60,6 +63,9 @@
             <button id="googleLoginBtn" class="ghost" type="button">Login with Google</button>
             <button id="googleSignupBtn" class="ghost" type="button">Sign Up with Google</button>
           </div>
+          <div class="row" style="margin-top: 10px">
+            <button id="guestLoginBtn" class="ghost" type="button">Login as Guest (For Demo)</button>
+          </div>
           <section id="liveStatusBox" class="live-status">
             <p data-live-main>Enter details to login or sign up.</p>
             <p data-live-sub class="muted">Checking live website status...</p>
@@ -67,6 +73,16 @@
         </section>
       </section>
     </main>
+    <dialog id="guestNoticeDialog" class="panel">
+      <button id="closeGuestNoticeX" class="dialog-close" aria-label="Close dialog" type="button">×</button>
+      <h3>Guest Mode (Demo)</h3>
+      <p class="muted">
+        You are entering demo mode. Your activity is available only during this session and will be deleted after logout.
+      </p>
+      <div class="row" style="margin-top: 8px">
+        <button id="continueGuestBtn" type="button">Continue</button>
+      </div>
+    </dialog>
     <script type="module" src="/status-widget.js"></script>
     <script type="module" src="/login.js"></script>
   </body>

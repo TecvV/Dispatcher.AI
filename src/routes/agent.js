@@ -9,12 +9,38 @@ import { processDueCheckIns } from "../services/checkinService.js";
 import { createGroundingCalendarEvent } from "../services/calendarService.js";
 import { generateReportsForUser, getLatestReports } from "../services/reportService.js";
 import { getValidGoogleAccessToken } from "../services/googleTokenService.js";
+import { ensureGuestSession, upsertGuestReports } from "../services/guestSessionStore.js";
 
 const router = Router();
 router.use(requireAuth);
 
+function isGuestRequest(req) {
+  const uid = String(req.user?._id || "");
+  const gid = String(req.user?.guestId || "");
+  return Boolean(req.user?.isGuest) || uid.startsWith("guest_") || gid.startsWith("guest_");
+}
+
+function buildGuestReports(session) {
+  const fallback = {
+    summary: "Demo mode: reports are generated in-memory for this guest session only.",
+    avgSentiment: 0.92,
+    distressedCount: 0,
+    details: {
+      moodCounts: { distressed: 0, uplifted: 1, neutral: 0, crisis: 0 },
+      swingCount: 0
+    },
+    generatedAt: new Date().toISOString()
+  };
+  return {
+    daily: session?.reports?.daily || fallback,
+    weekly: session?.reports?.weekly || fallback,
+    monthly: session?.reports?.monthly || fallback
+  };
+}
+
 router.get("/me/checkins", async (req, res, next) => {
   try {
+    if (isGuestRequest(req)) return res.json([]);
     const tasks = await CheckInTask.find({ userId: req.user._id }).sort({ scheduledFor: -1 }).limit(20);
     res.json(tasks);
   } catch (err) {
@@ -24,6 +50,7 @@ router.get("/me/checkins", async (req, res, next) => {
 
 router.get("/me/care-package/today", async (req, res, next) => {
   try {
+    if (isGuestRequest(req)) return res.json(null);
     const dateKey = new Date().toISOString().slice(0, 10);
     const pkg = await CarePackage.findOne({ userId: req.user._id, dateKey });
     res.json(pkg || null);
@@ -34,6 +61,15 @@ router.get("/me/care-package/today", async (req, res, next) => {
 
 router.post("/me/insight/generate", async (req, res, next) => {
   try {
+    if (isGuestRequest(req)) {
+      const session = ensureGuestSession(req.user.guestId || req.user._id, {
+        name: req.user.name,
+        email: req.user.email
+      });
+      const reports = buildGuestReports(session);
+      upsertGuestReports(req.user.guestId || req.user._id, reports);
+      return res.json(reports.weekly);
+    }
     const report = await generateWeeklyInsightForUser(req.user._id);
     res.json(report);
   } catch (err) {
@@ -43,6 +79,7 @@ router.post("/me/insight/generate", async (req, res, next) => {
 
 router.get("/me/insights", async (req, res, next) => {
   try {
+    if (isGuestRequest(req)) return res.json([]);
     const reports = await InsightReport.find({ userId: req.user._id }).sort({ createdAt: -1 }).limit(12);
     res.json(reports);
   } catch (err) {
@@ -52,6 +89,9 @@ router.get("/me/insights", async (req, res, next) => {
 
 router.post("/me/insight/schedule-grounding", async (req, res, next) => {
   try {
+    if (isGuestRequest(req)) {
+      return res.status(400).json({ error: "Calendar scheduling is unavailable in guest demo mode." });
+    }
     const { weekday, hour } = req.body;
     const user = await User.findById(req.user._id);
     if (!user) return res.status(404).json({ error: "User not found" });
@@ -85,6 +125,15 @@ router.post("/run-checkins", async (req, res, next) => {
 
 router.post("/me/reports/generate", async (req, res, next) => {
   try {
+    if (isGuestRequest(req)) {
+      const session = ensureGuestSession(req.user.guestId || req.user._id, {
+        name: req.user.name,
+        email: req.user.email
+      });
+      const reports = buildGuestReports(session);
+      upsertGuestReports(req.user.guestId || req.user._id, reports);
+      return res.json(reports);
+    }
     const reports = await generateReportsForUser(req.user._id);
     res.json(reports);
   } catch (err) {
@@ -94,6 +143,13 @@ router.post("/me/reports/generate", async (req, res, next) => {
 
 router.get("/me/reports", async (req, res, next) => {
   try {
+    if (isGuestRequest(req)) {
+      const session = ensureGuestSession(req.user.guestId || req.user._id, {
+        name: req.user.name,
+        email: req.user.email
+      });
+      return res.json(buildGuestReports(session));
+    }
     const reports = await getLatestReports(req.user._id);
     res.json(reports);
   } catch (err) {

@@ -418,10 +418,16 @@ async function loadReports() {
   renderDashboardVisuals();
 }
 
-logoutBtn.addEventListener("click", () => {
-  uiStatus("Logging out...", "Session cleared.", "ok");
-  clearToken();
-  window.location.href = "/login.html";
+logoutBtn.addEventListener("click", async () => {
+  try {
+    await api("/api/auth/logout", { method: "POST", body: "{}" });
+  } catch {
+    // best-effort logout
+  } finally {
+    uiStatus("Logging out...", "Session cleared.", "ok");
+    clearToken();
+    window.location.href = "/login.html";
+  }
 });
 
 if (changePasswordBtn) {

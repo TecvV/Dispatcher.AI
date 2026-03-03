@@ -2,7 +2,8 @@ import { Router } from "express";
 import crypto from "crypto";
 import { User } from "../models/User.js";
 import { requireAuth } from "../middleware/auth.js";
-import { hashPassword, issueToken, verifyPassword } from "../services/authService.js";
+import { hashPassword, issueGuestToken, issueToken, verifyPassword } from "../services/authService.js";
+import { clearGuestSession, createGuestSession } from "../services/guestSessionStore.js";
 import { sendSystemEmail } from "../services/emailService.js";
 
 const router = Router();
@@ -125,6 +126,37 @@ router.post("/login", async (req, res, next) => {
   }
 });
 
+router.post("/guest-login", async (req, res, next) => {
+  try {
+    const guestName = String(req.body?.name || "Guest User").trim() || "Guest User";
+    const session = createGuestSession({ name: guestName });
+    const token = issueGuestToken(session.id);
+    return res.status(201).json({
+      token,
+      guest: true,
+      user: {
+        id: session.user.id,
+        name: session.user.name,
+        email: session.user.email,
+        isGuest: true
+      }
+    });
+  } catch (err) {
+    next(err);
+  }
+});
+
+router.post("/logout", requireAuth, async (req, res, next) => {
+  try {
+    if (req.user?.isGuest && req.user?.guestId) {
+      clearGuestSession(req.user.guestId);
+    }
+    return res.json({ ok: true });
+  } catch (err) {
+    next(err);
+  }
+});
+
 router.post("/forgot-password", async (req, res, next) => {
   try {
     const email = String(req.body?.email || "").toLowerCase().trim();
@@ -242,6 +274,17 @@ router.post("/reset-password/complete", async (req, res, next) => {
 });
 
 router.get("/me", requireAuth, async (req, res) => {
+  if (req.user?.isGuest) {
+    return res.json({
+      user: {
+        id: req.user._id,
+        name: req.user.name,
+        email: req.user.email,
+        phone: "",
+        isGuest: true
+      }
+    });
+  }
   res.json({
     user: {
       id: req.user._id,
