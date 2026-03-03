@@ -1,0 +1,46 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Dispatcher.AI</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Inter:wght@600;700;800&family=Manrope:wght@400;500;700;800&display=swap"
+      rel="stylesheet"
+    />
+    <link rel="stylesheet" href="/ui.css" />
+  </head>
+  <body class="landing-page">
+    <main class="landing-hero">
+      <section class="landing-left">
+        <video class="landing-video" autoplay muted loop playsinline preload="auto">
+          <source src="/assets/landing.mp4" type="video/mp4" />
+        </video>
+        <div class="landing-overlay"></div>
+      </section>
+      <section class="landing-right">
+        <div class="landing-feature-tab">
+          <div class="landing-tab-brand">
+            <h1>Dispatcher.AI</h1>
+            <p>OMNI-CHANNEL RESPONSE RELAY</p>
+          </div>
+          <ul>
+            <li>AI Voice Calling Assistant + real-time call relay</li>
+            <li>Automated crisis detection and outreach</li>
+            <li>Omni-channel dispatch: Email, Telegram, Discord, Meet</li>
+            <li>Companion memory + mood insights dashboard</li>
+            <li>Escalation workflows with listener intelligence</li>
+          </ul>
+          <button id="enterAppBtn" class="landing-cta" type="button">Open Login / Signup</button>
+        </div>
+      </section>
+    </main>
+    <script>
+      document.getElementById("enterAppBtn")?.addEventListener("click", () => {
+        window.open("/login", "_blank", "noopener,noreferrer");
+      });
+    </script>
+  </body>
+</html>

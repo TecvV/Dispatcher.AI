@@ -51,7 +51,7 @@ export function createApp() {
   app.use("/api/voice", voiceRoutes);
 
   app.get("/", (req, res) => {
-    res.sendFile(path.join(publicDir, "login.html"));
+    res.sendFile(path.join(publicDir, "landing.html"));
   });
 
   app.get("/login", (req, res) => {
