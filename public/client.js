@@ -20,7 +20,7 @@ export async function api(path, options = {}) {
   };
   if (token) headers.Authorization = `Bearer ${token}`;
   const controller = new AbortController();
-  const timeoutMs = Number(options.timeoutMs || 20000);
+  const timeoutMs = Number(options.timeoutMs || 35000);
   const timer = setTimeout(() => controller.abort(), timeoutMs);
   try {
     const res = await fetch(path, { ...options, headers, signal: controller.signal });
