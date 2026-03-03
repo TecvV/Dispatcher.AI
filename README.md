@@ -9,7 +9,19 @@ Dispatcher.AI is a full-stack, agentic mental-wellness and outreach platform wit
 
 ## Most Important Features
 
-### 1) Crisis Detection and Automated Crisis Outreach (Critical)
+### 1) AI Voice Assistant + Call Intelligence
+- AI voice relay calls via Twilio voice routes.
+- Realtime voice pipeline support (Deepgram STT + ElevenLabs TTS) when enabled.
+- Voice-call script generation and dispatch from the Dispatch Console.
+- Contact-side conversational handling via LLM during calls.
+- Live call status tracking (ringing, in-progress, terminal states).
+- Post-call intelligence extraction:
+  - message sent via agent
+  - key ideas captured from contact-side conversation
+  - logs persisted and shown in "Call Logs managed by AI Voice Agent"
+- Call intelligence logs can be deleted from UI + backend.
+
+### 2) Crisis Detection and Automated Crisis Outreach
 - Semantic crisis triage (LLM-based, context-aware).
 - Distinguishes high-risk vs non-crisis/neutral queries.
 - Crisis guard flow can trigger automated outreach across configured channels.
@@ -21,18 +33,6 @@ Dispatcher.AI is a full-stack, agentic mental-wellness and outreach platform wit
 - Safety-oriented response behavior:
   - avoids fabricated certainty
   - provides emergency-safe guidance when needed
-
-### 2) AI Voice Assistant + Call Intelligence (Critical)
-- AI voice relay calls via Twilio voice routes.
-- Realtime voice pipeline support (Deepgram STT + ElevenLabs TTS) when enabled.
-- Voice-call script generation and dispatch from the Dispatch Console.
-- Contact-side conversational handling via LLM during calls.
-- Live call status tracking (ringing, in-progress, terminal states).
-- Post-call intelligence extraction:
-  - message sent via agent
-  - key ideas captured from contact-side conversation
-  - logs persisted and shown in “Call Logs managed by AI Voice Agent”
-- Call intelligence logs can be deleted from UI + backend.
 
 ---
 
