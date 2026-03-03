@@ -322,6 +322,17 @@ function renderProfile(profile) {
   answersInput.value = qualifications.join("\n");
   profileDialogInterests.value = interests.join(", ");
   profileDialogAnswers.value = qualifications.join("\n");
+  // Keep snapshot dialogs aligned with the same profile source shown in "My Listener Profile".
+  currentUser = {
+    ...(currentUser || {}),
+    listenerProfile: {
+      ...(currentUser?.listenerProfile || {}),
+      averageSatisfaction: Number(profile.averageSatisfaction || 0),
+      totalRatedSessions: Number(profile.totalRatedSessions || 0),
+      isListeningEnabled: Boolean(profile.isListeningEnabled),
+      tier: String(profile.tier || "novice")
+    }
+  };
 }
 
 function getCompletedListeningSessionsForCharts() {
@@ -792,8 +803,14 @@ function renderOutcomeBars(data) {
 
 function openHubSnapshotDialog() {
   if (!hubSnapshotDialog || !hubSnapshotContent) return;
-  const speakingUpcoming = outgoingBookings.filter((b) => String(b.status) !== "completed").length;
-  const listeningUpcoming = incomingBookings.filter((b) => String(b.status) !== "completed").length;
+  const nowTs = Date.now();
+  const isUpcomingBooking = (b) => {
+    const status = String(b?.status || "").toLowerCase();
+    const when = new Date(b?.scheduledAt || 0).getTime();
+    return (status === "pending" || status === "accepted") && Number.isFinite(when) && when >= nowTs;
+  };
+  const speakingUpcoming = outgoingBookings.filter(isUpcomingBooking).length;
+  const listeningUpcoming = incomingBookings.filter(isUpcomingBooking).length;
   const speakingCompleted = outgoingBookings.filter((b) => String(b.status) === "completed").length;
   const listeningCompleted = incomingBookings.filter((b) => String(b.status) === "completed").length;
   const openSlots = myOpenSlots.filter((s) => String(s.status) === "open").length;
@@ -821,6 +838,7 @@ function openHubSnapshotDialog() {
 
 function openSessionVisualsDialog() {
   if (!sessionVisualsDialog || !sessionVisualsContent) return;
+  const nowTs = Date.now();
   const all = [...incomingBookings, ...outgoingBookings];
   const statusCount = {
     open: 0,
@@ -833,10 +851,18 @@ function openSessionVisualsDialog() {
   const modeCount = { chat: 0, google_meet: 0 };
   for (const b of all) {
     const s = String(b.status || "").toLowerCase();
-    if (Object.hasOwn(statusCount, s)) statusCount[s] += 1;
+    if (s === "pending" || s === "accepted") {
+      const when = new Date(b?.scheduledAt || 0).getTime();
+      if (Number.isFinite(when) && when >= nowTs) {
+        statusCount[s] += 1;
+      }
+    } else if (Object.hasOwn(statusCount, s)) {
+      statusCount[s] += 1;
+    }
     const m = String(b.mode || "").toLowerCase();
     if (Object.hasOwn(modeCount, m)) modeCount[m] += 1;
   }
+  statusCount.open = myOpenSlots.filter((s) => String(s.status || "").toLowerCase() === "open").length;
   const totalModes = Math.max(1, modeCount.chat + modeCount.google_meet);
   const chatPct = Math.round((modeCount.chat / totalModes) * 100);
   const meetPct = 100 - chatPct;

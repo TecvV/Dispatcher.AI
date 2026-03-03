@@ -1,7 +1,7 @@
 import { env } from "../config/env.js";
 import { Contact } from "../models/Contact.js";
 
-export async function sendTelegramMessage({ chatId, text }) {
+export async function sendTelegramMessage({ chatId, text, attachments = [] }) {
   if (!env.telegram.botToken) {
     return { sent: false, reason: "Telegram bot token missing." };
   }
@@ -10,13 +10,14 @@ export async function sendTelegramMessage({ chatId, text }) {
     return { sent: false, reason: "Telegram chat ID missing." };
   }
 
-  const url = `${env.telegram.apiBase}/bot${env.telegram.botToken}/sendMessage`;
-  const res = await fetch(url, {
+  const sendTextUrl = `${env.telegram.apiBase}/bot${env.telegram.botToken}/sendMessage`;
+  const baseText = String(text || "").slice(0, 3500);
+  const res = await fetch(sendTextUrl, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
       chat_id: targetChatId,
-      text: String(text || "").slice(0, 3500)
+      text: baseText
     })
   });
 
@@ -33,6 +34,25 @@ export async function sendTelegramMessage({ chatId, text }) {
   }
   if (parsed && parsed.ok === false) {
     return { sent: false, reason: `Telegram API rejected request: ${parsed.description || body}` };
+  }
+
+  if (Array.isArray(attachments) && attachments.length) {
+    for (const file of attachments) {
+      const fileName = String(file?.fileName || "attachment").trim() || "attachment";
+      const mimeType = String(file?.mimeType || "application/octet-stream");
+      const content = file?.content;
+      if (!Buffer.isBuffer(content) || !content.length) continue;
+      const form = new FormData();
+      form.append("chat_id", targetChatId);
+      form.append("caption", `Attachment: ${fileName}`);
+      form.append("document", new Blob([content], { type: mimeType }), fileName);
+      const docUrl = `${env.telegram.apiBase}/bot${env.telegram.botToken}/sendDocument`;
+      const docRes = await fetch(docUrl, { method: "POST", body: form });
+      if (!docRes.ok) {
+        const docBody = await docRes.text();
+        return { sent: false, reason: `Telegram attachment error ${docRes.status}: ${docBody}` };
+      }
+    }
   }
 
   return { sent: true, response: parsed || body };

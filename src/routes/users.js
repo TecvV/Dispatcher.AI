@@ -28,11 +28,16 @@ router.patch("/me/health", async (req, res, next) => {
 
 router.patch("/me/preferences", async (req, res, next) => {
   try {
-    const allowed = ["topics", "language", "calendarOptIn", "healthOptIn"];
+    const allowed = ["topics", "language", "familyGreetingStyle", "calendarOptIn", "healthOptIn"];
     const update = {};
     for (const key of allowed) {
       if (Object.prototype.hasOwnProperty.call(req.body, key)) {
-        update[`preferences.${key}`] = req.body[key];
+        if (key === "familyGreetingStyle") {
+          const v = String(req.body[key] || "auto").trim().toLowerCase();
+          update[`preferences.${key}`] = ["auto", "namaste", "hello"].includes(v) ? v : "auto";
+        } else {
+          update[`preferences.${key}`] = req.body[key];
+        }
       }
     }
     const user = await User.findByIdAndUpdate(req.user._id, { $set: update }, { new: true });
@@ -75,7 +80,10 @@ router.get("/me/dashboard", async (req, res, next) => {
       user: {
         id: user._id,
         name: user.name,
-        email: user.email
+        email: user.email,
+        preferences: {
+          familyGreetingStyle: user.preferences?.familyGreetingStyle || "auto"
+        }
       },
       integrations: {
         googleConnected: Boolean(user.integrations?.googleCalendar?.connected && user.integrations?.googleCalendar?.accessToken),

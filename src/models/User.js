@@ -13,6 +13,7 @@ const userSchema = new mongoose.Schema(
     preferences: {
       topics: { type: [String], default: [] },
       language: { type: String, default: "en" },
+      familyGreetingStyle: { type: String, enum: ["auto", "namaste", "hello"], default: "auto" },
       calendarOptIn: { type: Boolean, default: false },
       healthOptIn: { type: Boolean, default: false }
     },

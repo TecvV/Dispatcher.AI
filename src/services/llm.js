@@ -50,6 +50,43 @@ function trimText(s, n = 700) {
   return t.length > n ? `${t.slice(0, n)}...` : t;
 }
 
+function normalizeThirdPersonLead({ text, senderName = "", recipientName = "" }) {
+  let out = String(text || "").trim();
+  if (!out) return out;
+  const esc = (s) => String(s || "").replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const s = esc(senderName);
+  const r = esc(recipientName);
+  if (s && r) {
+    // "Aryan informs Arya that ..." -> "Aryan ..."
+    out = out.replace(
+      new RegExp(`^\\s*${s}\\s+(?:informs?|would\\s+like\\s+to\\s+inform|wants\\s+to\\s+inform|is\\s+informing)\\s+${r}\\s+that\\s+`, "i"),
+      `${senderName} `
+    );
+  }
+  if (s) {
+    // "Aryan informs that ..." -> "Aryan ..."
+    out = out.replace(
+      new RegExp(`^\\s*${s}\\s+(?:informs?|would\\s+like\\s+to\\s+inform|wants\\s+to\\s+inform|is\\s+informing)\\s+that\\s+`, "i"),
+      `${senderName} `
+    );
+  }
+  // Generic fallback: "informs X that" -> ""
+  out = out.replace(/\b(?:informs?|would\s+like\s+to\s+inform|wants\s+to\s+inform|is\s+informing)\b\s*(?:[A-Z][\w .'-]{0,40}\s+)?that\s+/i, "");
+  return out.trim();
+}
+
+function enforceContactToneGuard({
+  text,
+  recipientType,
+  mode,
+  familyGreetingStyle = "auto",
+  senderName = "",
+  recipientName = "",
+  forceFormal = false
+}) {
+  // Fully LLM-driven output: no local tone/style rewrites.
+  return String(text || "").trim();
+}
 function asContextMessages(memoryMessages = []) {
   return memoryMessages
     .filter((m) => m.role === "user" || m.role === "assistant")
@@ -423,7 +460,7 @@ export async function generateSupportReply({ userName, message, memoryMessages, 
     [
       {
         role: "system",
-        content: `You are a compassionate mental wellness assistant named WcA (Wellness Care Assistant).
+        content: `You are Meera (Personalized AI Support Agent), the compassionate companion AI inside Dispatcher.AI.
 
 Your capabilities (tell users about these when asked):
 - Send emails to saved contacts
@@ -433,8 +470,17 @@ Your capabilities (tell users about these when asked):
 - Provide mental wellness support, health tips, and emotional support
 - Manage contacts and channels
 
-When user greets you ("hi", "hello", etc.): greet them warmly and briefly introduce yourself.
-When user asks your name: say your name is WcA (Wellness Care Assistant).
+Emotional-intelligence behavior requirements:
+- First understand emotion and intent from context before suggesting actions.
+- Reflect the user feeling in one short line ("It sounds like...", "I hear that...") without exaggeration.
+- Keep tone warm, calm, human, and non-judgmental.
+- Ask at most one gentle follow-up question when needed.
+- Do not label neutral queries as distress.
+- For normal informational requests, answer directly without safety overreaction.
+- Give practical, low-pressure next steps.
+
+When user greets you ("hi", "hello", etc.): greet warmly and briefly introduce yourself.
+When user asks your name: say your name is Meera (Personalized AI Support Agent).
 When user asks what you can do: briefly list your capabilities above.
 For health/wellness questions: provide helpful, empathetic advice.
 For emotional support: listen, validate, and gently guide.
@@ -673,7 +719,11 @@ Rules:
 }
 
 export async function generateContactEmailDraft({ contactName, contactType, userName, context }) {
-  const romanticType = ["bf", "gf", "spouse"].includes(String(contactType || "").toLowerCase());
+  const normalizedType = String(contactType || "").toLowerCase();
+  const romanticType = ["bf", "gf", "spouse"].includes(normalizedType);
+  const friendType = normalizedType === "friend";
+  const familyType = normalizedType === "family";
+  const professionalType = ["doctor", "psychiatrist", "other", "other user", "other_user"].includes(normalizedType);
   const raw = await callGroq(
     [
       {
@@ -689,7 +739,10 @@ Rules:
 - Do NOT ask for additional date/time/location details unless the email's purpose inherently requires them (e.g. scheduling a physical meeting). For general messages, notifications, or announcements, draft them as-is.
 - Do NOT ask for clarification after the user has already provided the message content.
 - Always produce a complete subject and body, never leave them empty when context exists.
-${romanticType ? `- Contact type is ${contactType}. Use a warm, classy, lightly romantic tone.\n- Include a gentle affectionate touch (for example: “dear”, “thinking of you”, “take care”), while staying natural.\n- Keep it tasteful and concise; avoid cringe/overly dramatic wording.\n- Keep email structure professional with a polished subject and graceful close.` : ""}`
+${romanticType ? `- Contact type is ${contactType}. Use a warm, classy, lightly romantic tone.\n- Include a gentle affectionate touch (for example: “dear”, “thinking of you”, “take care”), while staying natural.\n- Keep it tasteful and concise; avoid cringe/overly dramatic wording.\n- Keep email structure professional with a polished subject and graceful close.` : ""}
+${friendType ? `- Contact type is friend. Tone should be slightly informal but respectful, with natural friendly language.` : ""}
+${familyType ? `- Contact type is family. Tone should blend formal + informal, include respectful greeting, and remain warm.` : ""}
+${professionalType ? `- Contact type is ${contactType}. Tone must be strictly professional and polite.` : ""}`
       },
       {
         role: "user",
@@ -717,7 +770,11 @@ ${romanticType ? `- Contact type is ${contactType}. Use a warm, classy, lightly 
 }
 
 export async function generateVoiceCallScript({ contactName, contactType, userName, context }) {
-  const romanticType = ["bf", "gf", "spouse"].includes(String(contactType || "").toLowerCase());
+  const normalizedType = String(contactType || "").toLowerCase();
+  const romanticType = ["bf", "gf", "spouse"].includes(normalizedType);
+  const friendType = normalizedType === "friend";
+  const familyType = normalizedType === "family";
+  const professionalType = ["doctor", "psychiatrist", "other", "other user", "other_user"].includes(normalizedType);
   const raw = await callGroq(
     [
       {
@@ -729,9 +786,13 @@ Return ONLY strict JSON: {"script":"...","needs_clarification":boolean,"clarific
 Rules:
 - Keep it short and clear (about 1 to 3 sentences).
 - Start naturally with recipient name and who is relaying.
+- Use third-person relay style for sender content (not first-person).
 - If context has any concrete message intent, draft immediately.
 - needs_clarification=true only when context has no clear message.
-${romanticType ? `- Contact type is ${contactType}. Use warm, classy, lightly romantic wording.\n- Include one gentle affectionate line and a soft closing (for example: "take care", "thinking of you", "miss you").\n- Keep it tasteful and natural, never cheesy, never overly dramatic.` : ""}`
+${romanticType ? `- Contact type is ${contactType}. Use warm, classy, lightly romantic wording.\n- Include one gentle affectionate line and a soft closing (for example: "take care", "thinking of you", "miss you").\n- Keep it tasteful and natural, never cheesy, never overly dramatic.` : ""}
+${friendType ? `- Contact type is friend. Tone should be slightly informal but respectful, while remaining clear for voice relay.` : ""}
+${familyType ? `- Contact type is family. Tone should blend respectful warmth with natural family informality.` : ""}
+${professionalType ? `- Contact type is ${contactType}. Tone must be strictly professional and polite.` : ""}`
       },
       {
         role: "user",
@@ -756,12 +817,214 @@ ${romanticType ? `- Contact type is ${contactType}. Use warm, classy, lightly ro
   };
 }
 
+export async function generateVoiceCallConversationTurn({
+  relayMessage,
+  callerUtterance,
+  recentTurns = [],
+  userName,
+  contactName
+}) {
+  const callerText = String(callerUtterance || "").trim();
+  const compactTurns = Array.isArray(recentTurns)
+    ? recentTurns
+        .slice(-10)
+        .map((t) => `${t.role}: ${trimText(t.text, 280)}`)
+        .join("\n")
+    : "";
+  const raw = await callGroq(
+    [
+      {
+        role: "system",
+        content: `You are a voice relay assistant on a phone call.
+
+Return ONLY strict JSON:
+{"reply":"...","endCall":boolean}
+
+Rules:
+- Answer the caller's question directly and clearly, to the best of available context and general knowledge.
+- Keep replies concise and natural for voice (1-3 sentences, max 60 words).
+- Prioritize factual safety. If you are not confident, do NOT guess.
+- If unknown/uncertain, use this exact line:
+  "I don't know about this, however I'll confirm it once with ${userName || "the user"} and let you know as soon as possible."
+- Try to resolve follow-up doubts step-by-step when possible.
+- Preserve relay context and help both sides coordinate clearly.
+- If the caller shares a message/request to pass to the user, acknowledge and confirm it will be conveyed to ${userName || "the user"}.
+- In that acknowledgement case, DO NOT repeat or quote the caller's full sentence back.
+- If caller asks to stop/end/bye semantically, set endCall=true and give a polite final line.
+- If caller asks to repeat the original relay message semantically, repeat it briefly.
+- Never provide diagnosis, legal certainty claims, or unsafe instructions.
+- Use semantic meaning, not brittle literal matching.`
+      },
+      {
+        role: "user",
+        content: `Relay context: ${relayMessage || ""}
+Original sender: ${userName || "the sender"}
+Contact being called: ${contactName || "contact"}
+Recent turns:
+${compactTurns || "none"}
+
+Caller just said:
+${callerUtterance || ""}`
+      }
+    ],
+    0.2
+  );
+  const parsed = parseJsonSafe(raw, null);
+  if (parsed && typeof parsed === "object") {
+    let reply = String(parsed.reply || "").trim();
+    const endCall = Boolean(parsed.endCall);
+    if (reply && isNearParrotReply(callerText, reply)) {
+      reply = `Understood. I will convey this to ${userName || "the user"} as soon as possible.`;
+    }
+    if (reply) return { reply, endCall };
+  }
+  return {
+    reply: "Thanks for sharing. I have noted that. If you are done, you can say goodbye, or continue speaking.",
+    endCall: false
+  };
+}
+
+export async function verifyVoiceReplySafety({
+  draftReply,
+  relayMessage,
+  callerUtterance,
+  userName = "",
+  contactName = ""
+}) {
+  const fallback = `I don't know about this, however I'll confirm it once with ${userName || "the user"} and let you know as soon as possible.`;
+  const raw = await callGroq(
+    [
+      {
+        role: "system",
+        content: `You are a strict fact-safety verifier for a phone voice assistant.
+
+Return ONLY strict JSON:
+{"safeReply":"...","isAdjusted":boolean,"reason":"short"}
+
+Rules:
+- Preserve meaning when the draft reply is safe and reasonable.
+- If draft reply may contain uncertain/fabricated facts, overconfident claims, or risky misinformation, rewrite to a safer response.
+- Never guess unknown facts.
+- If uncertain, use this exact line:
+  "${fallback}"
+- Keep output concise for voice (max 60 words).
+- Do not add new facts not grounded in context.`
+      },
+      {
+        role: "user",
+        content: `Original sender: ${userName || "the sender"}
+Contact being called: ${contactName || "contact"}
+Relay context: ${relayMessage || ""}
+Caller utterance: ${callerUtterance || ""}
+Draft reply to verify: ${draftReply || ""}`
+      }
+    ],
+    0
+  );
+  const parsed = parseJsonSafe(raw, null);
+  if (parsed && typeof parsed === "object") {
+    let safeReply = String(parsed.safeReply || "").trim();
+    const isAdjusted = Boolean(parsed.isAdjusted);
+    const reason = String(parsed.reason || "").trim();
+    if (safeReply && isNearParrotReply(String(callerUtterance || ""), safeReply)) {
+      safeReply = `Understood. I will convey this to ${userName || "the user"} as soon as possible.`;
+    }
+    if (safeReply) return { safeReply, isAdjusted, reason };
+  }
+  return { safeReply: String(draftReply || "").trim() || fallback, isAdjusted: false, reason: "fallback_passthrough" };
+}
+
+function isNearParrotReply(sourceText, replyText) {
+  const a = String(sourceText || "")
+    .toLowerCase()
+    .replace(/[^a-z0-9\s]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+  const b = String(replyText || "")
+    .toLowerCase()
+    .replace(/[^a-z0-9\s]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+  if (!a || !b) return false;
+  if (a === b) return true;
+  const aw = new Set(a.split(" ").filter(Boolean));
+  const bw = new Set(b.split(" ").filter(Boolean));
+  if (!aw.size || !bw.size) return false;
+  let inter = 0;
+  for (const w of aw) if (bw.has(w)) inter += 1;
+  const overlapA = inter / aw.size;
+  const overlapB = inter / bw.size;
+  return overlapA >= 0.8 && overlapB >= 0.65;
+}
+
+export async function summarizeVoiceCallContactInsights({
+  relayMessage = "",
+  userName = "",
+  contactName = "",
+  turns = []
+}) {
+  const callerTurns = Array.isArray(turns)
+    ? turns.filter((t) => String(t?.role || "") === "caller").slice(-24)
+    : [];
+  if (!callerTurns.length) {
+    return {
+      summary: "",
+      keyPoints: []
+    };
+  }
+  const compactCallerText = callerTurns
+    .map((t) => `- ${trimText(String(t?.text || ""), 240)}`)
+    .join("\n");
+
+  const raw = await callGroq(
+    [
+      {
+        role: "system",
+        content: `Extract important actionable information from a completed phone call with a contact.
+
+Return ONLY strict JSON:
+{"summary":"...","keyPoints":["...","...","..."]}
+
+Rules:
+- Focus only on what the CONTACT said (caller role).
+- Include only concrete useful points for the original user: requests, concerns, schedule constraints, promised actions, follow-ups.
+- Do NOT repeat or paraphrase details that came only from the original relay message unless the contact explicitly repeated them.
+- Do not fabricate details.
+- Keep summary short (max 80 words).
+- keyPoints should be 3-6 concise bullets.
+- Exclude sensitive diagnosis claims and avoid unsafe guidance.
+- If no meaningful content, return empty summary and empty keyPoints.`
+      },
+      {
+        role: "user",
+        content: `Original sender: ${userName || "user"}
+Contact: ${contactName || "contact"}
+Original relay message: ${relayMessage || ""}
+Caller statements:
+${compactCallerText}`
+      }
+    ],
+    0.1
+  );
+  const parsed = parseJsonSafe(raw, null);
+  if (parsed && typeof parsed === "object") {
+    const summary = String(parsed.summary || "").trim();
+    const keyPoints = Array.isArray(parsed.keyPoints)
+      ? parsed.keyPoints.map((x) => String(x || "").trim()).filter(Boolean).slice(0, 8)
+      : [];
+    return { summary, keyPoints };
+  }
+  return { summary: "", keyPoints: [] };
+}
+
 export async function rewriteDispatchMessage({
   mode,
   userName,
   recipientLabel,
   recipientName = "",
   recipientType = "",
+  familyGreetingStyle = "auto",
+  forceFormal = false,
   context
 }) {
   const normalizedType = String(recipientType || "").trim().toLowerCase();
@@ -776,17 +1039,27 @@ Return ONLY strict JSON:
 
 Rules:
 - Keep original intent exactly.
-- Use first-person voice from the user.
+- Voice perspective rule:
+  - For modes general_mail, physical_mail, google_meet: write in first-person from the user.
+  - For modes telegram_message, discord_message, voice_call: write in third-person relay style.
 - Be slightly elaborative and polished (not too short, not too long).
 - Do not add new facts.
 - For mode=general_mail or physical_mail, also provide a polished subject.
 - For mode=google_meet, make it invite-appropriate and clear.
 - For mode=discord_message, tone must be informative + formal (group/channel broadcast style).
-- For recipient types gf/bf/spouse: classy romantic (subtle, respectful, never cringe).
-- For recipient type friend: a little informal but respectful.
-- For recipient type family: blended formal+informal with respectful greeting.
-- For recipient types doctor/psychiatrist/other: strictly professional tone.
-- If recipient type is unknown, use neutral respectful tone.`
+- For mode=telegram_message and mode=discord_message, append this exact final line:
+  "This is an auto-generated message, do not reply to this."
+- NON-NEGOTIABLE tone matrix (must follow):
+  - recipientType = gf/bf/spouse AND FORCE FORMAL is false:
+    use classy romantic tone (warm, caring, affectionate but not cheesy). Do NOT output dry corporate phrasing.
+    Include at least one warm emotional phrase naturally (example style: "he is really looking forward to seeing you", "he cares deeply and hopes to make it up soon").
+  - recipientType = friend: slightly informal + respectful.
+  - recipientType = family: respectful, warm, with greeting.
+  - recipientType = doctor/psychiatrist/other: professional + formal.
+  - recipientType unknown: neutral respectful.
+- If FORCE FORMAL is true, override all personal tones and write one common formal message.
+- Never mention "tone", "style", or meta commentary in the output.
+${forceFormal ? "- FORCE FORMAL: Use formal, neutral, respectful language regardless of recipient type. Do not use romantic/informal tone." : ""}`
       },
       {
         role: "user",
@@ -802,18 +1075,40 @@ Raw message: ${context}`
   );
   const parsed = parseJsonSafe(raw, null);
   if (parsed && typeof parsed === "object") {
-    return {
+    const rewrittenText = enforceContactToneGuard({
       text: String(parsed.text || "").trim(),
+      recipientType: normalizedType,
+      mode,
+      familyGreetingStyle,
+      senderName: userName,
+      recipientName,
+      forceFormal
+    });
+    return {
+      text: rewrittenText,
       subject: String(parsed.subject || "").trim()
     };
   }
   return {
-    text: String(context || "").trim(),
+    text: enforceContactToneGuard({
+      text: String(context || "").trim(),
+      recipientType: normalizedType,
+      mode,
+      familyGreetingStyle,
+      senderName: userName,
+      recipientName,
+      forceFormal
+    }),
     subject: ""
   };
 }
 
 export async function generateContactTelegramMessage({ contactName, contactType, userName, context }) {
+  const normalizedType = String(contactType || "").toLowerCase();
+  const romanticType = ["bf", "gf", "spouse"].includes(normalizedType);
+  const friendType = normalizedType === "friend";
+  const familyType = normalizedType === "family";
+  const professionalType = ["doctor", "psychiatrist", "other", "other user", "other_user"].includes(normalizedType);
   const raw = await callGroq(
     [
       {
@@ -823,9 +1118,13 @@ export async function generateContactTelegramMessage({ contactName, contactType,
 Return ONLY strict JSON: {"text":"...","needs_clarification":boolean,"clarification_question":"..."}
 
 Rules:
-- Write in first-person voice from the user.
+- Write in third-person relay voice.
 - Draft based strictly on user intent.
-- If details are ambiguous or missing → needs_clarification=true.`
+- If details are ambiguous or missing, needs_clarification=true.
+${romanticType ? `- Contact type is ${contactType}. Use a classy romantic tone (subtle, respectful, not cringe).` : ""}
+${friendType ? `- Contact type is friend. Use a slightly informal but respectful tone.` : ""}
+${familyType ? `- Contact type is family. Use a respectful warm tone with natural family greeting style.` : ""}
+${professionalType ? `- Contact type is ${contactType}. Use a strictly professional tone.` : ""}`
       },
       {
         role: "user",
@@ -851,7 +1150,11 @@ Rules:
 }
 
 export async function updateTelegramDraftState({ contactName, contactType, userName, newMessage, currentDetails }) {
-  const romanticType = ["bf", "gf", "spouse"].includes(String(contactType || "").toLowerCase());
+  const normalizedType = String(contactType || "").toLowerCase();
+  const romanticType = ["bf", "gf", "spouse"].includes(normalizedType);
+  const friendType = normalizedType === "friend";
+  const familyType = normalizedType === "family";
+  const professionalType = ["doctor", "psychiatrist", "other", "other user", "other_user"].includes(normalizedType);
   const raw = await callGroq(
     [
       {
@@ -867,8 +1170,11 @@ Mandatory rules:
 - Date/time/location are NEVER required unless the message's purpose is specifically about scheduling. For general messages, set ready=true immediately.
 - Do NOT ask for clarification after content has been provided.
 - NEVER set missing_fields to date/time/location for non-scheduling messages.
-- Draft text must be in first-person voice from the user.
-${romanticType ? `- Contact type is ${contactType}. Draft text in a warm, classy, lightly romantic tone.\n- Include a subtle affectionate touch (for example: “thinking of you”, “take care”, “miss you”), but keep it brief.\n- Keep it natural and respectful; avoid cheesy or excessive lines.` : ""}
+- Draft text must be in third-person relay voice.
+${romanticType ? `- Contact type is ${contactType}. Draft text in a warm, classy, lightly romantic tone.\n- Include a subtle affectionate touch (for example: "thinking of you", "take care", "miss you"), but keep it brief.\n- Keep it natural and respectful; avoid cheesy or excessive lines.` : ""}
+${friendType ? `- Contact type is friend. Draft text should be slightly informal but respectful.` : ""}
+${familyType ? `- Contact type is family. Draft text should blend warm family tone with respectful greeting style.` : ""}
+${professionalType ? `- Contact type is ${contactType}. Draft text must be strictly professional and polite.` : ""}
 
 Return ONLY strict JSON:
 {"updated_details":{"purpose":"","date":"","time":"","location":"","contactFullName":"","invitees":"","notes":""},"missing_fields":[],"clarification_question":"...","ready":boolean,"draft_text":"..."}`
@@ -911,6 +1217,11 @@ Return ONLY strict JSON:
 }
 
 export async function updateDiscordDraftState({ contactName, contactType, userName, newMessage, currentDetails }) {
+  const normalizedType = String(contactType || "").toLowerCase();
+  const romanticType = ["bf", "gf", "spouse"].includes(normalizedType);
+  const friendType = normalizedType === "friend";
+  const familyType = normalizedType === "family";
+  const professionalType = ["doctor", "psychiatrist", "other", "other user", "other_user"].includes(normalizedType);
   const raw = await callGroq(
     [
       {
@@ -921,8 +1232,14 @@ Merge current known details with new user message semantically. Never discard kn
 
 Mandatory rules:
 - A concrete message intent/purpose is required before ready=true.
-- If latest input is only target-selection text → ready=false, ask what should be sent.
+- If latest input is only target-selection text -> ready=false, ask what should be sent.
 - Date/time/location are optional unless explicitly needed.
+- Draft text must be in third-person relay voice.
+- Discord tone baseline must be informative + formal for group/channel audience.
+${romanticType ? `- If recipient context is ${contactType}, keep a classy affectionate nuance but preserve informative/formal clarity.` : ""}
+${friendType ? `- If friend context applies, keep it slightly informal but still respectful and clear.` : ""}
+${familyType ? `- If family context applies, keep it respectful and warm without becoming overly casual.` : ""}
+${professionalType ? `- If professional context applies (${contactType}), maintain strictly professional wording.` : ""}
 
 Return ONLY strict JSON:
 {"updated_details":{"purpose":"","date":"","time":"","location":"","contactFullName":"","invitees":"","notes":""},"missing_fields":[],"clarification_question":"...","ready":boolean,"draft_text":"..."}`
@@ -963,8 +1280,6 @@ Return ONLY strict JSON:
     draftText: ""
   };
 }
-
-// ─── MISC ─────────────────────────────────────────────────────────────────────
 
 export async function extractRelayMessage({ message, recentContext }) {
   const raw = await callGroq(

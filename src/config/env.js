@@ -55,7 +55,22 @@ export const env = {
     authToken: process.env.TWILIO_AUTH_TOKEN || "",
     fromNumber: process.env.TWILIO_FROM_NUMBER || "",
     apiBase: process.env.TWILIO_API_BASE || "https://api.twilio.com/2010-04-01",
-    webhookBaseUrl: process.env.TWILIO_WEBHOOK_BASE_URL || ""
+    webhookBaseUrl: process.env.TWILIO_WEBHOOK_BASE_URL || "",
+    voice: process.env.TWILIO_VOICE || "Polly.Aditi",
+    voiceLanguage: process.env.TWILIO_VOICE_LANGUAGE || "en-IN",
+    enableRealtimeStream: String(process.env.TWILIO_ENABLE_REALTIME_STREAM || "false").toLowerCase() === "true",
+    enableBidirectionalStream: String(process.env.TWILIO_ENABLE_BIDIRECTIONAL_STREAM || "false").toLowerCase() === "true"
+  },
+  voiceAI: {
+    enabled: String(process.env.VOICE_AI_ENABLED || "false").toLowerCase() === "true",
+    deepgramApiKey: process.env.DEEPGRAM_API_KEY || "",
+    deepgramWsUrl:
+      process.env.DEEPGRAM_WS_URL ||
+      "wss://api.deepgram.com/v1/listen?encoding=mulaw&sample_rate=8000&channels=1&interim_results=false&punctuate=true&endpointing=300",
+    elevenLabsApiKey: process.env.ELEVENLABS_API_KEY || "",
+    elevenLabsVoiceId: process.env.ELEVENLABS_VOICE_ID || "",
+    elevenLabsModelId: process.env.ELEVENLABS_MODEL_ID || "eleven_turbo_v2_5",
+    elevenLabsBaseUrl: process.env.ELEVENLABS_API_BASE || "https://api.elevenlabs.io/v1"
   },
   memory: {
     maxMessages: Number(process.env.MEMORY_MAX_MESSAGES || 300),
@@ -65,3 +80,60 @@ export const env = {
     platformCommissionPct: Number(process.env.ESCALATION_PLATFORM_COMMISSION_PCT || 0)
   }
 };
+
+export function getRealtimeVoiceConfigReport() {
+  const isTwilioStreamEnabled = Boolean(env.twilio.enableRealtimeStream);
+  const isVoiceAiEnabled = Boolean(env.voiceAI.enabled);
+  const wantsRealtime = isTwilioStreamEnabled || isVoiceAiEnabled;
+  const missing = [];
+  const warnings = [];
+
+  if (!isTwilioStreamEnabled) missing.push("TWILIO_ENABLE_REALTIME_STREAM=true");
+  if (!isVoiceAiEnabled) missing.push("VOICE_AI_ENABLED=true");
+
+  if (!env.twilio.accountSid) missing.push("TWILIO_ACCOUNT_SID");
+  if (!env.twilio.authToken) missing.push("TWILIO_AUTH_TOKEN");
+  if (!env.twilio.fromNumber) missing.push("TWILIO_FROM_NUMBER");
+  if (!env.twilio.webhookBaseUrl) missing.push("TWILIO_WEBHOOK_BASE_URL");
+  if (!env.voiceAI.deepgramApiKey) missing.push("DEEPGRAM_API_KEY");
+  if (!env.voiceAI.elevenLabsApiKey) missing.push("ELEVENLABS_API_KEY");
+  if (!env.voiceAI.elevenLabsVoiceId) missing.push("ELEVENLABS_VOICE_ID");
+  if (isTwilioStreamEnabled && !env.twilio.enableBidirectionalStream) {
+    warnings.push("TWILIO_ENABLE_BIDIRECTIONAL_STREAM=false (safe mode). This improves call stability; Twilio voice may handle prompts.");
+  }
+
+  if (env.twilio.webhookBaseUrl && !/^https:\/\//i.test(env.twilio.webhookBaseUrl)) {
+    warnings.push("TWILIO_WEBHOOK_BASE_URL should be public HTTPS (ngrok/deployed URL).");
+  }
+  if (env.voiceAI.deepgramWsUrl && !/^wss:\/\//i.test(env.voiceAI.deepgramWsUrl)) {
+    warnings.push("DEEPGRAM_WS_URL should be WSS endpoint.");
+  }
+
+  const suspiciousSpacedKeys = [
+    "TWILIO_ACCOUNT_SID =",
+    "TWILIO_AUTH_TOKEN =",
+    "TWILIO_FROM_NUMBER =",
+    "TWILIO_WEBHOOK_BASE_URL ="
+  ];
+  for (const rawKey of suspiciousSpacedKeys) {
+    if (Object.prototype.hasOwnProperty.call(process.env, rawKey)) {
+      warnings.push(`Detected malformed env key "${rawKey}". Remove spaces around '=' in .env.`);
+    }
+  }
+
+  return {
+    wantsRealtime,
+    ready:
+      isTwilioStreamEnabled &&
+      isVoiceAiEnabled &&
+      !missing.includes("TWILIO_ACCOUNT_SID") &&
+      !missing.includes("TWILIO_AUTH_TOKEN") &&
+      !missing.includes("TWILIO_FROM_NUMBER") &&
+      !missing.includes("TWILIO_WEBHOOK_BASE_URL") &&
+      !missing.includes("DEEPGRAM_API_KEY") &&
+      !missing.includes("ELEVENLABS_API_KEY") &&
+      !missing.includes("ELEVENLABS_VOICE_ID"),
+    missing: [...new Set(missing)],
+    warnings
+  };
+}

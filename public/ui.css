@@ -503,7 +503,7 @@ button.ghost {
 }
 
 .chat-window {
-  height: 124vh;
+  height: 190vh;
   overflow-y: auto;
   border: 1px solid #1d405f;
   border-radius: 12px;
@@ -1023,6 +1023,8 @@ button.ghost {
   background-color: #0f172a66;
   border: 1px solid #334155;
   max-width: 86%;
+  position: relative;
+  padding-right: 34px;
 }
 
 #chatLog .msg.bot,
@@ -1423,15 +1425,25 @@ button.ghost {
   position: relative;
 }
 
+.chat-input-actions {
+  position: absolute;
+  right: 8px;
+  top: 50%;
+  transform: translateY(-50%);
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+
 .chat-input-wrap textarea {
   min-height: 52px;
   max-height: 140px;
-  resize: vertical;
+  resize: none;
   border-radius: 999px;
   background: linear-gradient(145deg, #1a1a1a, #151515);
   border: 1px solid #5a2a1e;
   color: #f3ece8;
-  padding: 14px 52px 14px 16px;
+  padding: 14px 102px 14px 16px;
   line-height: 1.4;
   box-shadow: inset 0 0 0 1px #2a1712;
 }
@@ -1447,10 +1459,7 @@ button.ghost {
 }
 
 .send-icon-btn {
-  position: absolute;
-  right: 8px;
-  top: 50%;
-  transform: translateY(-50%);
+  position: static;
   width: 36px;
   height: 36px;
   border-radius: 999px;
@@ -1461,6 +1470,204 @@ button.ghost {
   display: grid;
   place-items: center;
   box-shadow: 0 0 0 1px #f05b2b55 inset, 0 0 10px #c9461d55;
+}
+
+.call-intel-panel {
+  display: grid;
+  gap: 8px;
+}
+
+.row-space {
+  justify-content: space-between;
+  align-items: center;
+}
+
+.call-intel-box {
+  border: 1px solid #4a2117;
+  border-radius: 10px;
+  background: #151515;
+  padding: 10px;
+  max-height: 220px;
+  overflow-y: auto;
+}
+
+.call-intel-card {
+  display: grid;
+  gap: 8px;
+}
+
+.call-intel-head {
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+  align-items: center;
+}
+
+.call-intel-summary {
+  margin: 0;
+  color: #f3ece8;
+}
+
+.call-intel-points {
+  margin: 0;
+  padding-left: 18px;
+  color: #d9cbc5;
+}
+
+.call-intel-log {
+  display: grid;
+  gap: 10px;
+  border: 1px solid #4a2117;
+  border-radius: 10px;
+  padding: 10px;
+  background: #101010;
+}
+
+.call-intel-log + .call-intel-log {
+  margin-top: 10px;
+}
+
+.call-intel-label {
+  font-size: 12px;
+  font-weight: 700;
+  color: #f3ece8;
+  letter-spacing: 0.02em;
+  text-transform: uppercase;
+}
+
+.call-intel-message {
+  margin: 0;
+  color: #e5d7d0;
+  white-space: pre-wrap;
+}
+
+.call-intel-analyzing {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 6px 2px;
+}
+
+.call-intel-analyzing-title {
+  margin: 0 0 2px 0;
+  font-weight: 700;
+  color: #f3ece8;
+}
+
+.call-intel-spinner {
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  border: 2px solid #5a2a1e;
+  border-top-color: #f05b2b;
+  box-shadow: 0 0 8px #f05b2b66;
+  animation: callIntelSpin 0.9s linear infinite;
+}
+
+@keyframes callIntelSpin {
+  from {
+    transform: rotate(0deg);
+  }
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+.reference-anchor-bar {
+  margin-top: 8px;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  max-width: 100%;
+  border: 1px solid #5a2a1e;
+  border-radius: 999px;
+  padding: 6px 10px;
+  background: #151515;
+}
+
+.reference-anchor-text {
+  font-size: 12px;
+  color: #f3ece8;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: min(70vw, 520px);
+}
+
+.reference-anchor-clear {
+  width: 20px;
+  height: 20px;
+  border-radius: 999px;
+  border: 1px solid #7a3524;
+  background: #121212;
+  color: #ffd6ca;
+  padding: 0;
+  line-height: 1;
+  font-size: 14px;
+}
+
+.chat-ref-popover-btn {
+  position: fixed;
+  z-index: 2000;
+  border: 1px solid #f05b2b;
+  background: #1a1a1a;
+  color: #fff0ea;
+  border-radius: 999px;
+  padding: 6px 10px;
+  font-size: 12px;
+  font-weight: 700;
+  box-shadow: 0 8px 24px #00000080, 0 0 10px #f05b2b40;
+}
+
+.msg-copy-btn {
+  position: absolute;
+  right: 8px;
+  bottom: 6px;
+  width: 20px;
+  height: 20px;
+  border-radius: 999px;
+  border: 1px solid #3c4963;
+  background: #0f172acc;
+  color: #cbd5e1;
+  font-size: 11px;
+  line-height: 1;
+  padding: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  opacity: 0.82;
+  transition: opacity 140ms ease, border-color 140ms ease, box-shadow 140ms ease;
+}
+
+#chatLog .msg:hover .msg-copy-btn {
+  opacity: 1;
+  border-color: #2dd4bf;
+  box-shadow: 0 0 8px #2dd4bf40;
+}
+
+.msg-copy-btn.copied {
+  border-color: #2dd4bf;
+  color: #bafcf1;
+  box-shadow: 0 0 10px #2dd4bf66;
+}
+
+.mic-icon-btn {
+  position: static;
+  width: 36px;
+  height: 36px;
+  border-radius: 999px;
+  padding: 0;
+  background: #151515;
+  color: #f3ece8;
+  border: 1px solid #5a2a1e;
+  font-size: 16px;
+  display: grid;
+  place-items: center;
+}
+
+.mic-icon-btn:hover {
+  border-color: #f05b2b;
+  box-shadow: 0 0 0 1px #f05b2b44 inset, 0 0 10px #f05b2b33;
 }
 
 .draft-tabs {
@@ -1481,6 +1688,10 @@ button.ghost {
   color: #cbd5e1;
   font-weight: 700;
   padding: 8px 10px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
 }
 
 .draft-tab.active {
@@ -1488,6 +1699,29 @@ button.ghost {
   border-color: #2dd4bf;
   color: #e2fdf8;
   box-shadow: 0 0 0 1px #2dd4bf44 inset;
+}
+
+.draft-tab-badge {
+  min-width: 18px;
+  height: 18px;
+  border-radius: 999px;
+  border: 1px solid #334155;
+  background: #0f172a;
+  color: #9ca3af;
+  font-size: 11px;
+  font-weight: 800;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  line-height: 1;
+  padding: 0 5px;
+}
+
+.draft-tab-badge.active {
+  border-color: #f05b2b;
+  color: #fff2ec;
+  background: linear-gradient(135deg, #f05b2b, #c9461d);
+  box-shadow: 0 0 10px #c9461d66;
 }
 
 .draft-pane {
@@ -1591,6 +1825,44 @@ button.ghost {
   border-radius: 10px;
   padding: 10px;
   resize: vertical;
+  padding-right: 80px;
+}
+
+.recipient-message-wrap {
+  position: relative;
+}
+
+.recipient-mini-tools {
+  position: absolute;
+  right: 8px;
+  top: 8px;
+  display: flex;
+  gap: 6px;
+}
+
+.recipient-mini-btn {
+  width: 30px;
+  height: 30px;
+  border-radius: 999px;
+  padding: 0;
+  border: 1px solid #4a2117;
+  background: #161616;
+  color: #f3ece8;
+  display: grid;
+  place-items: center;
+  font-size: 13px;
+}
+
+.recipient-mini-btn:hover {
+  border-color: #f05b2b;
+  box-shadow: 0 0 0 1px #f05b2b44 inset;
+}
+
+.recipient-attachment-list {
+  margin-top: 6px;
+  margin-bottom: 2px;
+  color: #c2aaa0;
+  font-size: 12px;
 }
 
 .recipient-action-row {

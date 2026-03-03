@@ -15,7 +15,7 @@
         <div class="site-brand">Dispatcher.AI</div>
         <div class="site-links">
           <a class="site-link" href="/dashboard">Dashboard</a>
-          <a class="site-link active" href="/chat">Companion Chat</a>
+          <a class="site-link active" href="/chat">Dispatch Console</a>
           <a class="site-link" href="/escalation">Escalation Hub</a>
           <button id="changePasswordBtn" class="site-link">Change Password</button>
           <button id="logoutBtn" class="site-link">Logout</button>
@@ -49,11 +49,20 @@
             </div>
             <span id="queueBadge" class="queue-badge" style="display: none">Queued (0)</span>
           </div>
+          <div id="referenceAnchorBar" class="reference-anchor-bar" style="display:none;">
+            <span id="referenceAnchorText" class="reference-anchor-text"></span>
+            <button id="clearReferenceAnchorBtn" class="reference-anchor-clear" type="button" aria-label="Clear reference">×</button>
+          </div>
           <div class="chat-input-wrap">
             <textarea id="message" rows="1" placeholder="Tell me what is going on..."></textarea>
-            <button id="sendBtn" class="send-icon-btn" aria-label="Send message" title="Send">
-              <span aria-hidden="true">➤</span>
-            </button>
+            <div class="chat-input-actions">
+              <button id="micBtn" class="mic-icon-btn" aria-label="Voice input" title="Voice input">
+                <span aria-hidden="true">&#127908;</span>
+              </button>
+              <button id="sendBtn" class="send-icon-btn" aria-label="Send message" title="Send">
+                <span aria-hidden="true">&#10148;</span>
+              </button>
+            </div>
           </div>
         </section>
         <aside class="panel stack">
@@ -96,6 +105,16 @@
                 <button id="copyVoiceBtn" class="ghost copy-btn" type="button">Copy to Clipboard</button>
               </div>
             </section>
+          </div>
+          <div class="panel-soft call-intel-panel">
+            <div class="row row-space">
+              <h3>Call Logs managed by AI Voice Agent</h3>
+              <button id="clearCallIntelBtn" class="ghost" type="button">Delete Logs</button>
+            </div>
+            <p id="callStatusNow" class="muted">No active call.</p>
+            <div id="callIntelBox" class="call-intel-box">
+              <p class="muted">Voice-agent call insights will appear here after call disconnects.</p>
+            </div>
           </div>
           <div id="choiceBox" style="display: none">
             <p id="choiceText" class="muted"></p>
@@ -193,4 +212,6 @@
     </dialog>
   </body>
 </html>
+
+
 

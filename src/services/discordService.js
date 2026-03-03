@@ -5,7 +5,7 @@ function normalizeWebhookUrl(url) {
   return String(url || "").trim();
 }
 
-export async function sendDiscordMessage({ webhookUrl, channelId, text }) {
+export async function sendDiscordMessage({ webhookUrl, channelId, text, attachments = [] }) {
   const content = String(text || "").trim();
   if (!content) {
     return { sent: false, reason: "Discord message text is empty." };
@@ -13,13 +13,37 @@ export async function sendDiscordMessage({ webhookUrl, channelId, text }) {
 
   const targetWebhook = normalizeWebhookUrl(webhookUrl || env.discord.defaultWebhookUrl);
   if (targetWebhook) {
-    const res = await fetch(targetWebhook, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        content: content.slice(0, 1900)
-      })
-    });
+    let res;
+    if (Array.isArray(attachments) && attachments.length) {
+      const form = new FormData();
+      form.append(
+        "payload_json",
+        JSON.stringify({
+          content: content.slice(0, 1900)
+        })
+      );
+      let i = 0;
+      for (const file of attachments) {
+        const fileName = String(file?.fileName || "attachment").trim() || "attachment";
+        const mimeType = String(file?.mimeType || "application/octet-stream");
+        const contentBuffer = file?.content;
+        if (!Buffer.isBuffer(contentBuffer) || !contentBuffer.length) continue;
+        form.append(`files[${i}]`, new Blob([contentBuffer], { type: mimeType }), fileName);
+        i += 1;
+      }
+      res = await fetch(targetWebhook, {
+        method: "POST",
+        body: form
+      });
+    } else {
+      res = await fetch(targetWebhook, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          content: content.slice(0, 1900)
+        })
+      });
+    }
     const body = await res.text();
     if (!res.ok) {
       return { sent: false, reason: `Discord webhook error ${res.status}: ${body}` };
@@ -36,6 +60,12 @@ export async function sendDiscordMessage({ webhookUrl, channelId, text }) {
   }
 
   const url = `${env.discord.apiBase}/channels/${targetChannelId}/messages`;
+  if (Array.isArray(attachments) && attachments.length) {
+    return {
+      sent: false,
+      reason: "Discord bot-channel mode does not support attachments in this build. Use webhook channel dispatch."
+    };
+  }
   const res = await fetch(url, {
     method: "POST",
     headers: {

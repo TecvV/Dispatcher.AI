@@ -8,8 +8,12 @@ const changePasswordBtn = document.getElementById("changePasswordBtn");
 const chatLog = document.getElementById("chatLog");
 const message = document.getElementById("message");
 const sendBtn = document.getElementById("sendBtn");
+const micBtn = document.getElementById("micBtn");
 const modeSelect = document.getElementById("modeSelect");
 const queueBadge = document.getElementById("queueBadge");
+const referenceAnchorBar = document.getElementById("referenceAnchorBar");
+const referenceAnchorText = document.getElementById("referenceAnchorText");
+const clearReferenceAnchorBtn = document.getElementById("clearReferenceAnchorBtn");
 const tips = document.getElementById("tips");
 const emailDraft = document.getElementById("emailDraft");
 const sendEmailBtn = document.getElementById("sendEmailBtn");
@@ -32,6 +36,7 @@ const chooseTelegramBtn = document.getElementById("chooseTelegramBtn");
 const chooseDiscordBtn = document.getElementById("chooseDiscordBtn");
 const draftTabButtons = Array.from(document.querySelectorAll("[data-draft-tab-btn]"));
 const draftPanes = Array.from(document.querySelectorAll("[data-draft-pane]"));
+const draftTabAttachmentBadges = {};
 const copyTelegramBtn = document.getElementById("copyTelegramBtn");
 const copyDiscordBtn = document.getElementById("copyDiscordBtn");
 const copyVoiceBtn = document.getElementById("copyVoiceBtn");
@@ -53,6 +58,9 @@ const chatToneLabel = document.getElementById("chatToneLabel");
 const openSnapshotBtn = document.getElementById("openSnapshotBtn");
 const snapshotDialog = document.getElementById("snapshotDialog");
 const closeSnapshotDialogX = document.getElementById("closeSnapshotDialogX");
+const callIntelBox = document.getElementById("callIntelBox");
+const callStatusNow = document.getElementById("callStatusNow");
+const clearCallIntelBtn = document.getElementById("clearCallIntelBtn");
 const uiStatus = (main, sub = "", tone = "info") => window.setUIStatus?.(main, sub, tone);
 let latestEmailContactIds = [];
 let latestTelegramContactIds = [];
@@ -73,6 +81,8 @@ let selectedRecipients = new Set();
 let recipientPickerMode = "";
 let recipientPickerKind = "";
 let recipientPickerNode = null;
+let recipientPickerFiles = [];
+let latestDispatchAttachments = [];
 const chatSnapshot = {
   total: 0,
   user: 0,
@@ -90,6 +100,19 @@ const chatSnapshot = {
 };
 const companionToneSeries = [];
 const MAX_TONE_POINTS = 20;
+let speechRecognizer = null;
+let selectedReferenceText = "";
+let referencePopoverBtn = null;
+let voiceCallPollTimer = null;
+let lastVoiceStatusFingerprint = "";
+let lastIntelCallId = "";
+let currentUserName = "You";
+
+const modeToDraftTab = {
+  telegram_message: "telegram",
+  discord_message: "discord",
+  voice_call: "voice"
+};
 
 function scoreCompanionTone(text) {
   const t = String(text || "").toLowerCase();
@@ -332,8 +355,39 @@ function activateDraftTab(name) {
   }
 }
 
+function initDraftTabBadges() {
+  for (const btn of draftTabButtons) {
+    const tab = String(btn.dataset.draftTabBtn || "").trim();
+    if (!tab) continue;
+    let badge = btn.querySelector(".draft-tab-badge");
+    if (!badge) {
+      badge = document.createElement("span");
+      badge.className = "draft-tab-badge";
+      badge.textContent = "0";
+      btn.appendChild(badge);
+    }
+    draftTabAttachmentBadges[tab] = badge;
+  }
+  clearDraftAttachmentBadges();
+}
+
+function setDraftAttachmentBadge(tab, count) {
+  const badge = draftTabAttachmentBadges[String(tab || "")];
+  if (!badge) return;
+  const n = Math.max(0, Number(count || 0));
+  badge.textContent = `${n}`;
+  badge.classList.toggle("active", n > 0);
+}
+
+function clearDraftAttachmentBadges() {
+  for (const tab of Object.keys(draftTabAttachmentBadges)) {
+    setDraftAttachmentBadge(tab, 0);
+  }
+}
+
 function setupDraftTabs() {
   if (!draftTabButtons.length) return;
+  initDraftTabBadges();
   for (const btn of draftTabButtons) {
     btn.addEventListener("click", () => activateDraftTab(btn.dataset.draftTabBtn));
   }
@@ -361,6 +415,189 @@ async function copyToClipboard(text) {
     } catch {
       return false;
     }
+  }
+}
+
+function toBase64FromDataUrl(dataUrl) {
+  const value = String(dataUrl || "");
+  const idx = value.indexOf(",");
+  return idx >= 0 ? value.slice(idx + 1) : "";
+}
+
+function mergePickedFiles(existing = [], incoming = []) {
+  const map = new Map();
+  for (const f of existing) {
+    const k = `${f.name}::${f.size}::${f.lastModified}`;
+    map.set(k, f);
+  }
+  for (const f of incoming) {
+    const k = `${f.name}::${f.size}::${f.lastModified}`;
+    map.set(k, f);
+  }
+  return Array.from(map.values()).slice(0, 10);
+}
+
+function fileToDataUrl(file) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(String(reader.result || ""));
+    reader.onerror = () => reject(new Error("Failed to read file."));
+    reader.readAsDataURL(file);
+  });
+}
+
+async function filesToAttachmentPayload(files = []) {
+  const out = [];
+  for (const file of files.slice(0, 10)) {
+    const dataUrl = await fileToDataUrl(file);
+    const dataBase64 = toBase64FromDataUrl(dataUrl);
+    if (!dataBase64) continue;
+    out.push({
+      fileName: file.name,
+      mimeType: file.type || "application/octet-stream",
+      dataBase64
+    });
+  }
+  return out;
+}
+
+function getSpeechRecognitionCtor() {
+  return window.SpeechRecognition || window.webkitSpeechRecognition || null;
+}
+
+function startSpeechCapture(targetInput) {
+  const Ctor = getSpeechRecognitionCtor();
+  if (!Ctor) {
+    uiStatus("Voice input unavailable.", "Speech recognition is not supported in this browser.", "error");
+    return;
+  }
+  if (!targetInput) return;
+  try {
+    if (speechRecognizer) {
+      speechRecognizer.stop();
+      speechRecognizer = null;
+    }
+    const rec = new Ctor();
+    speechRecognizer = rec;
+    rec.lang = "en-IN";
+    rec.continuous = true;
+    rec.interimResults = true;
+    rec.maxAlternatives = 1;
+    let silenceTimer = null;
+    let idleWatch = null;
+    let committed = false;
+    let hadInput = false;
+    let captured = "";
+    let interim = "";
+    const liveBase = String(targetInput.value || "").trim();
+    let lastActivityAt = Date.now();
+    const armSilenceCutoff = () => {
+      lastActivityAt = Date.now();
+      if (silenceTimer) clearTimeout(silenceTimer);
+      silenceTimer = setTimeout(() => {
+        try {
+          rec.abort();
+        } catch {}
+      }, 5000);
+    };
+    const normalizeSpeech = (s) =>
+      String(s || "")
+        .replace(/\s+/g, " ")
+        .trim();
+    const composeLiveValue = () => {
+      const parts = [liveBase, normalizeSpeech(captured), normalizeSpeech(interim)].filter(Boolean);
+      return parts.join(" ").replace(/\s+/g, " ").trim();
+    };
+    const renderLive = () => {
+      targetInput.value = composeLiveValue();
+      targetInput.dispatchEvent(new Event("input", { bubbles: true }));
+    };
+    const mergeSpeech = (base, chunk) => {
+      const a = normalizeSpeech(base);
+      const b = normalizeSpeech(chunk);
+      if (!b) return a;
+      if (!a) return b;
+      const al = a.toLowerCase();
+      const bl = b.toLowerCase();
+      if (bl === al) return a;
+      if (bl.startsWith(al)) return b;
+      if (al.startsWith(bl)) return a;
+      const aw = a.split(" ");
+      const bw = b.split(" ");
+      const maxOverlap = Math.min(aw.length, bw.length);
+      let overlap = 0;
+      for (let k = maxOverlap; k > 0; k -= 1) {
+        const tail = aw.slice(aw.length - k).join(" ").toLowerCase();
+        const head = bw.slice(0, k).join(" ").toLowerCase();
+        if (tail === head) {
+          overlap = k;
+          break;
+        }
+      }
+      if (overlap > 0) {
+        return `${a} ${bw.slice(overlap).join(" ")}`.trim();
+      }
+      return `${a} ${b}`.trim();
+    };
+    uiStatus("Listening...", "Speak now. Your voice will be converted to text locally in browser.", "info");
+    armSilenceCutoff();
+    idleWatch = setInterval(() => {
+      if (Date.now() - lastActivityAt >= 5000) {
+        try {
+          rec.abort();
+        } catch {}
+      }
+    }, 250);
+    rec.onspeechstart = () => armSilenceCutoff();
+    rec.onsoundstart = () => armSilenceCutoff();
+    rec.onaudiostart = () => armSilenceCutoff();
+    rec.onresult = (ev) => {
+      armSilenceCutoff();
+      const startIdx = Number(ev?.resultIndex || 0);
+      const total = Number(ev?.results?.length || 0);
+      let interimCandidate = "";
+      for (let i = startIdx; i < total; i += 1) {
+        const r = ev.results[i];
+        const text = normalizeSpeech(r?.[0]?.transcript || "");
+        if (!text) continue;
+        hadInput = true;
+        if (r?.isFinal) {
+          captured = mergeSpeech(captured, text);
+          interim = "";
+        } else {
+          interimCandidate = mergeSpeech(interimCandidate, text);
+        }
+      }
+      if (interimCandidate) {
+        interim = interimCandidate;
+      }
+      renderLive();
+    };
+    rec.onerror = () => {
+      if (silenceTimer) clearTimeout(silenceTimer);
+      if (idleWatch) clearInterval(idleWatch);
+      uiStatus("Voice capture failed.", "Could not transcribe speech. Try again.", "error");
+    };
+    rec.onend = () => {
+      if (silenceTimer) clearTimeout(silenceTimer);
+      if (idleWatch) clearInterval(idleWatch);
+      if (!committed) {
+        committed = true;
+        const finalText = normalizeSpeech(captured || interim);
+        if (finalText) {
+          const parts = [liveBase, finalText].filter(Boolean);
+          targetInput.value = parts.join(" ").replace(/\s+/g, " ").trim();
+          targetInput.dispatchEvent(new Event("input", { bubbles: true }));
+          uiStatus("Voice captured.", "Text inserted into message box.", "ok");
+        } else if (!hadInput) {
+          uiStatus("Listening stopped.", "No speech detected for 5 seconds.", "info");
+        }
+      }
+      if (speechRecognizer === rec) speechRecognizer = null;
+    };
+    rec.start();
+  } catch {
+    uiStatus("Voice input unavailable.", "Could not start microphone capture.", "error");
   }
 }
 
@@ -406,6 +643,93 @@ function setupCopyButtons() {
       }
     });
   }
+}
+
+function shortenRef(text, max = 140) {
+  const t = String(text || "").replace(/\s+/g, " ").trim();
+  return t.length > max ? `${t.slice(0, max)}...` : t;
+}
+
+function setReferenceAnchor(text) {
+  const clean = String(text || "").replace(/\s+/g, " ").trim();
+  selectedReferenceText = clean;
+  if (!referenceAnchorBar || !referenceAnchorText) return;
+  if (!clean) {
+    referenceAnchorBar.style.display = "none";
+    referenceAnchorText.textContent = "";
+    return;
+  }
+  referenceAnchorText.textContent = `Ref: "${shortenRef(clean)}"`;
+  referenceAnchorBar.style.display = "flex";
+}
+
+function ensureReferencePopover() {
+  if (referencePopoverBtn) return referencePopoverBtn;
+  const btn = document.createElement("button");
+  btn.type = "button";
+  btn.className = "chat-ref-popover-btn";
+  btn.textContent = "Refer this";
+  btn.style.display = "none";
+  btn.addEventListener("click", () => {
+    const sel = window.getSelection();
+    const text = String(sel?.toString() || "").trim();
+    if (!text) return;
+    setReferenceAnchor(text);
+    btn.style.display = "none";
+    uiStatus("Reference pinned.", "Your next message will include this selected context for the assistant.", "ok");
+  });
+  document.body.appendChild(btn);
+  referencePopoverBtn = btn;
+  return btn;
+}
+
+function hideReferencePopover() {
+  if (!referencePopoverBtn) return;
+  referencePopoverBtn.style.display = "none";
+}
+
+function initSelectionReferenceUi() {
+  ensureReferencePopover();
+  if (clearReferenceAnchorBtn) {
+    clearReferenceAnchorBtn.addEventListener("click", () => setReferenceAnchor(""));
+  }
+  const showIfValidSelection = () => {
+    const sel = window.getSelection();
+    const selected = String(sel?.toString() || "").trim();
+    if (!selected || !chatLog) {
+      hideReferencePopover();
+      return;
+    }
+    const range = sel.rangeCount ? sel.getRangeAt(0) : null;
+    if (!range) {
+      hideReferencePopover();
+      return;
+    }
+    const common = range.commonAncestorContainer;
+    const containerNode = common?.nodeType === Node.TEXT_NODE ? common.parentElement : common;
+    if (!containerNode || !chatLog.contains(containerNode)) {
+      hideReferencePopover();
+      return;
+    }
+    const rect = range.getBoundingClientRect();
+    if (!rect || (rect.width === 0 && rect.height === 0)) {
+      hideReferencePopover();
+      return;
+    }
+    const btn = ensureReferencePopover();
+    btn.style.left = `${Math.max(12, rect.right + 8)}px`;
+    btn.style.top = `${Math.max(12, rect.top - 6)}px`;
+    btn.style.display = "inline-flex";
+  };
+  document.addEventListener("mouseup", () => setTimeout(showIfValidSelection, 0));
+  document.addEventListener("keyup", () => setTimeout(showIfValidSelection, 0));
+  document.addEventListener("scroll", hideReferencePopover, true);
+  document.addEventListener("click", (ev) => {
+    if (referencePopoverBtn && ev.target === referencePopoverBtn) return;
+    if (referenceAnchorBar && referenceAnchorBar.contains(ev.target)) return;
+    const sel = window.getSelection();
+    if (!String(sel?.toString() || "").trim()) hideReferencePopover();
+  });
 }
 
 function appendFormattedText(container, text) {
@@ -547,6 +871,25 @@ async function addMsg(text, type = "bot", opts = {}) {
   } else {
     appendRichMessage(div, text);
   }
+  if (type !== "mode-badge" && type !== "thinking") {
+    const copyBtn = document.createElement("button");
+    copyBtn.type = "button";
+    copyBtn.className = "msg-copy-btn";
+    copyBtn.title = "Copy message";
+    copyBtn.setAttribute("aria-label", "Copy message");
+    copyBtn.innerHTML = "⧉";
+    copyBtn.addEventListener("click", async () => {
+      const ok = await copyToClipboard(String(text || ""));
+      if (ok) {
+        copyBtn.classList.add("copied");
+        uiStatus("Message copied.", "Copied to clipboard.", "ok");
+        setTimeout(() => copyBtn.classList.remove("copied"), 700);
+      } else {
+        uiStatus("Copy failed.", "Could not copy message.", "error");
+      }
+    });
+    div.appendChild(copyBtn);
+  }
   chatLog.scrollTop = chatLog.scrollHeight;
   noteMessage(type);
   noteCompanionTone(type, text);
@@ -569,6 +912,8 @@ function clearRecipientPicker() {
   recipientPickerNode = null;
   recipientPickerMode = "";
   recipientPickerKind = "";
+  recipientPickerFiles = [];
+  latestDispatchAttachments = [];
   selectedRecipients = new Set();
 }
 
@@ -679,6 +1024,8 @@ function renderRecipientPickerForMode(mode) {
   selectedRecipients = keep;
   recipientPickerMode = normalizeMode(mode);
   recipientPickerKind = spec.kind;
+  recipientPickerFiles = [];
+  latestDispatchAttachments = [];
 
   if (recipientPickerNode && recipientPickerNode.parentNode) {
     recipientPickerNode.parentNode.removeChild(recipientPickerNode);
@@ -728,6 +1075,8 @@ function renderRecipientPickerForMode(mode) {
   msgLabel.textContent = "Message to send:";
   wrapper.appendChild(msgLabel);
 
+  const msgInputWrap = document.createElement("div");
+  msgInputWrap.className = "recipient-message-wrap";
   const msgBox = document.createElement("textarea");
   msgBox.className = "recipient-message-input";
   msgBox.rows = 3;
@@ -735,7 +1084,45 @@ function renderRecipientPickerForMode(mode) {
     recipientPickerMode === "google_meet"
       ? "Provide your supporting message here. LLM will re-write before sending it, along with Google-Meet Link."
       : "Write the message intent here. LLM will rewrite it before draft/send.";
-  wrapper.appendChild(msgBox);
+  msgInputWrap.appendChild(msgBox);
+  const miniTools = document.createElement("div");
+  miniTools.className = "recipient-mini-tools";
+  const miniMicBtn = document.createElement("button");
+  miniMicBtn.type = "button";
+  miniMicBtn.className = "recipient-mini-btn";
+  miniMicBtn.title = "Voice input";
+  miniMicBtn.innerHTML = "&#127908;";
+  miniMicBtn.addEventListener("click", () => startSpeechCapture(msgBox));
+  miniTools.appendChild(miniMicBtn);
+  const miniAttachBtn = document.createElement("button");
+  miniAttachBtn.type = "button";
+  miniAttachBtn.className = "recipient-mini-btn";
+  miniAttachBtn.title = "Attach document";
+  miniAttachBtn.innerHTML = "&#128206;";
+  const fileInput = document.createElement("input");
+  fileInput.type = "file";
+  fileInput.multiple = true;
+  fileInput.accept = "*/*";
+  fileInput.style.display = "none";
+  miniAttachBtn.addEventListener("click", () => fileInput.click());
+  miniTools.appendChild(miniAttachBtn);
+  msgInputWrap.appendChild(miniTools);
+  wrapper.appendChild(msgInputWrap);
+  wrapper.appendChild(fileInput);
+  const attachList = document.createElement("div");
+  attachList.className = "recipient-attachment-list";
+  attachList.textContent = "No attachments selected.";
+  wrapper.appendChild(attachList);
+  recipientPickerFiles = [];
+  fileInput.addEventListener("change", () => {
+    recipientPickerFiles = mergePickedFiles(recipientPickerFiles, Array.from(fileInput.files || []));
+    if (!recipientPickerFiles.length) {
+      attachList.textContent = "No attachments selected.";
+      return;
+    }
+    attachList.textContent = `Attachments: ${recipientPickerFiles.map((f) => f.name).join(", ")}`;
+    fileInput.value = "";
+  });
 
   const actionRow = document.createElement("div");
   actionRow.className = "recipient-action-row";
@@ -759,6 +1146,7 @@ function renderRecipientPickerForMode(mode) {
         uiStatus("Message missing.", "Write the message before submitting.", "error");
         return;
       }
+      const attachmentPayload = await filesToAttachmentPayload(recipientPickerFiles);
       prepareBtn.disabled = true;
       uiStatus("Preparing message...", "LLM is rewriting your message.", "info");
       const out = await api("/api/chat/prepare-dispatch", {
@@ -766,9 +1154,15 @@ function renderRecipientPickerForMode(mode) {
         body: JSON.stringify({
           mode: recipientPickerMode,
           selectedContacts: selected,
-          message: raw
+          message: raw,
+          attachments: attachmentPayload
         })
       });
+      latestDispatchAttachments = attachmentPayload;
+      const activeTab = modeToDraftTab[recipientPickerMode] || "";
+      if (activeTab) {
+        setDraftAttachmentBadge(activeTab, attachmentPayload.length);
+      }
       if (recipientPickerMode === "general_mail" || recipientPickerMode === "physical_mail") {
         if (out.emailDraft) {
           emailDraft.value = `Subject: ${out.emailDraft.subject || ""}\n\n${out.emailDraft.body || ""}`;
@@ -806,6 +1200,10 @@ function renderRecipientPickerForMode(mode) {
           const link = out.sentGoogleMeetInvite.meetLink || "";
           await addMsg(`Google Meet invite sent to selected contacts.${link ? ` Meet link: ${link}` : ""}`, "bot");
           uiStatus("Google Meet invite sent.", "Invitations delivered by email.", "ok");
+          latestDispatchAttachments = [];
+          recipientPickerFiles = [];
+          fileInput.value = "";
+          attachList.textContent = "No attachments selected.";
         } else {
           const reason = out.sentGoogleMeetInvite?.reason || "Google Meet invite send failed.";
           await addMsg(`Google Meet invite failed: ${reason}`, "alert");
@@ -863,7 +1261,7 @@ function getSelectedRecipientIds(kind) {
   return selected;
 }
 
-async function handleDispatch({ mode, draftedMessage, subject = "", body = "" }) {
+async function handleDispatch({ mode, draftedMessage, subject = "", body = "", attachments = [] }) {
   const spec = getRecipientSpec(mode);
   const selected = getSelectedRecipientIds(spec.kind);
   if (!selected.length) {
@@ -876,9 +1274,133 @@ async function handleDispatch({ mode, draftedMessage, subject = "", body = "" })
       selectedContacts: selected,
       draftedMessage: String(draftedMessage || ""),
       subject: String(subject || ""),
-      body: String(body || "")
+      body: String(body || ""),
+      attachments
     })
   });
+}
+
+function prettyCallStatus(status) {
+  const s = String(status || "").toLowerCase();
+  if (s === "dialing") return "Ring going on";
+  if (s === "ringing") return "Ring going on";
+  if (s === "in_progress" || s === "streaming") return "Call in progress";
+  if (s === "no_pickup") return "Contact did not pick the call";
+  if (s === "rejected") return "Contact rejected the call";
+  if (s === "failed") return "Call failed";
+  if (s === "cancelled") return "Call cancelled";
+  if (s === "completed") return "Call disconnected";
+  return s ? `Call status: ${s}` : "No active call.";
+}
+
+function personalizeCallIntelText(text, contactName, userName) {
+  let out = String(text || "").trim();
+  if (!out) return out;
+  const contact = String(contactName || "").trim() || "the contact";
+  const user = String(userName || "").trim() || "you";
+  out = out
+    .replace(/\bcaller\b/gi, contact)
+    .replace(/\bcontact\b/gi, contact)
+    .replace(/\buser\b/gi, user);
+  return out;
+}
+
+function renderCallIntelligence(data = {}) {
+  if (!callIntelBox || !callStatusNow) return;
+  const latest = data.latest || null;
+  const latestCompleted = data.latestCompletedWithIntel || null;
+  const intelLogs = Array.isArray(data.intelLogs) ? data.intelLogs : [];
+  const latestStatus = String(latest?.effectiveStatus || latest?.status || "");
+  const terminalSet = new Set(["completed", "rejected", "no_pickup", "cancelled", "failed"]);
+  const isLatestTerminal = terminalSet.has(
+    String(latest?.effectiveTerminalStatus || latest?.effectiveStatus || latest?.terminalStatus || latest?.status || "")
+  );
+  const latestHasInsights =
+    Boolean(String(latest?.intelligenceSummary || "").trim()) ||
+    (Array.isArray(latest?.intelligenceKeyPoints) && latest.intelligenceKeyPoints.length > 0) ||
+    Boolean(latest?.intelligenceExtractedAt);
+
+  if (latestStatus) {
+    callStatusNow.textContent = `${prettyCallStatus(latestStatus)}${latest.contactName ? ` (${latest.contactName})` : ""}`;
+  } else {
+    callStatusNow.textContent = "No active call.";
+  }
+
+  if (isLatestTerminal && !latestHasInsights) {
+    callIntelBox.innerHTML = `
+      <div class="call-intel-analyzing">
+        <span class="call-intel-spinner" aria-hidden="true"></span>
+        <div>
+          <p class="call-intel-analyzing-title">Analyzing call insights...</p>
+          <p class="muted">The call ended. Extracting important points shared by ${latest?.contactName || "the contact"}.</p>
+        </div>
+      </div>
+    `;
+    return;
+  }
+
+  if (!intelLogs.length && !latestCompleted) {
+    callIntelBox.innerHTML = '<p class="muted">Voice-agent call insights will appear here after call disconnects.</p>';
+    return;
+  }
+
+  const logsToRender = intelLogs.length ? intelLogs : [latestCompleted].filter(Boolean);
+  callIntelBox.innerHTML = logsToRender
+    .map((log) => {
+      const summary = String(log?.intelligenceSummary || "").trim();
+      const keyPoints = Array.isArray(log?.intelligenceKeyPoints)
+        ? log.intelligenceKeyPoints.map((x) => String(x || "").trim()).filter(Boolean)
+        : [];
+      const sentMessage = String(log?.sentMessage || "").trim();
+      const contactName = String(log?.contactName || "").trim() || "Contact";
+      const pSummary = personalizeCallIntelText(summary, contactName, currentUserName);
+      const pPoints = keyPoints.map((x) => personalizeCallIntelText(x, contactName, currentUserName));
+      const pSentMessage = personalizeCallIntelText(sentMessage, contactName, currentUserName);
+      const ts = log?.timestamp ? new Date(log.timestamp).toLocaleString() : "";
+      return `
+        <div class="call-intel-log">
+          <div class="call-intel-head">
+            <strong>${contactName}</strong>
+            <span class="muted">${ts || ""}</span>
+          </div>
+          <div>
+            <div class="call-intel-label">Message Sent Via Agent To ${contactName}</div>
+            <p class="call-intel-message">${pSentMessage || "No sent message recorded."}</p>
+          </div>
+          <div>
+            <div class="call-intel-label">Important Ideas Captured From ${contactName}</div>
+            <p class="call-intel-summary">${pSummary || "No key summary captured."}</p>
+            <ul class="call-intel-points">
+              ${pPoints.length ? pPoints.map((p) => `<li>${p}</li>`).join("") : "<li>No key points captured.</li>"}
+            </ul>
+          </div>
+        </div>
+      `;
+    })
+    .join("");
+}
+
+async function pollVoiceCallOverview() {
+  try {
+    const out = await api("/api/chat/voice-calls/overview");
+    renderCallIntelligence(out || {});
+    const latest = out?.latest || null;
+    if (latest?.id) {
+      const statusText = String(latest.effectiveStatus || latest.status || "");
+      const fp = `${latest.id}:${statusText}:${latest.updatedAt || ""}`;
+      if (fp !== lastVoiceStatusFingerprint) {
+        lastVoiceStatusFingerprint = fp;
+        uiStatus(prettyCallStatus(statusText), latest.contactName ? `${latest.contactName}` : "", "info");
+      }
+    }
+    const completed = out?.latestCompletedWithIntel || null;
+    if (completed?.id && completed.id !== lastIntelCallId) {
+      lastIntelCallId = completed.id;
+      uiStatus("Call insights ready.", "Important points are available in Call Logs managed by AI Voice Agent.", "ok");
+    }
+  } catch {
+    // Keep silent; avoid noisy status on transient poll errors.
+  }
 }
 
 async function loadHistory() {
@@ -890,7 +1412,7 @@ async function loadHistory() {
   }
 }
 
-async function processChat(text, actionChoice = "") {
+async function processChat(text, actionChoice = "", referenceText = "") {
   pendingQueueCount += 1;
   renderQueueBadge();
   const run = async () => {
@@ -902,6 +1424,7 @@ async function processChat(text, actionChoice = "") {
         body: JSON.stringify({
           message: text,
           actionChoice,
+          referenceText: String(referenceText || ""),
           clientTimezone
         })
       });
@@ -969,6 +1492,7 @@ if (deleteChatBtn) {
         telegramDraft.value = "";
         discordDraft.value = "";
         voiceCallDraft.value = "";
+        clearDraftAttachmentBadges();
         sendEmailBtn.style.display = "none";
         sendTelegramBtn.style.display = "none";
         sendDiscordBtn.style.display = "none";
@@ -980,6 +1504,7 @@ if (deleteChatBtn) {
         latestProposalId = "";
         pendingChoiceBaseMessage = "";
         forcedActionChoice = "";
+        setReferenceAnchor("");
         clearRecipientPicker();
         choiceBox.style.display = "none";
         meetProposalBox.style.display = "none";
@@ -1007,10 +1532,12 @@ sendBtn.addEventListener("click", async () => {
       return;
     }
     const text = message.value.trim();
+    const referenceText = selectedReferenceText;
     addMsg(text, "me");
     message.value = "";
+    setReferenceAnchor("");
     uiStatus("Sending message...", "Companion is thinking.");
-    const out = await processChat(text, getEffectiveActionChoice());
+    const out = await processChat(text, getEffectiveActionChoice(), referenceText);
     if (out.tips?.length) {
       tips.textContent = out.tips.join(" ");
       addMsg(`Tips: ${out.tips.join(" ")}`, "bot");
@@ -1163,6 +1690,10 @@ message.addEventListener("keydown", (e) => {
   }
 });
 
+if (micBtn) {
+  micBtn.addEventListener("click", () => startSpeechCapture(message));
+}
+
 if (modeSelect) {
   modeSelect.addEventListener("change", async () => {
     selectedModeChoice = String(modeSelect.value || "support_chat");
@@ -1312,13 +1843,16 @@ sendTelegramBtn.addEventListener("click", async () => {
     uiStatus("Sending Telegram message...", "Delivering via bot.");
     const out = await handleDispatch({
       mode: "telegram_message",
-      draftedMessage: text
+      draftedMessage: text,
+      attachments: latestDispatchAttachments
     });
     if (out.dispatched?.sent) {
       addMsg(`Telegram sent to ${out.dispatched.sentCount}/${out.dispatched.total} selected contact(s).`, "bot");
       uiStatus("Telegram sent.", `Delivered to ${out.dispatched.sentCount} contact(s).`, "ok");
       sendTelegramBtn.style.display = "none";
       telegramDraft.value = "";
+      latestDispatchAttachments = [];
+      setDraftAttachmentBadge("telegram", 0);
       forcedActionChoice = "";
     } else {
       addMsg(`Telegram send failed: ${out.dispatched?.reason || "Unknown error"}`, "alert");
@@ -1347,13 +1881,16 @@ sendDiscordBtn.addEventListener("click", async () => {
     uiStatus("Sending Discord message...", "Delivering via webhook.");
     const out = await handleDispatch({
       mode: "discord_message",
-      draftedMessage: text
+      draftedMessage: text,
+      attachments: latestDispatchAttachments
     });
     if (out.dispatched?.sent) {
       addMsg(`Discord sent to ${out.dispatched.sentCount}/${out.dispatched.total} selected channel(s).`, "bot");
       uiStatus("Discord sent.", `Delivered to ${out.dispatched.sentCount} channel(s).`, "ok");
       sendDiscordBtn.style.display = "none";
       discordDraft.value = "";
+      latestDispatchAttachments = [];
+      setDraftAttachmentBadge("discord", 0);
       forcedActionChoice = "";
     } else {
       addMsg(`Discord send failed: ${out.dispatched?.reason || "Unknown error"}`, "alert");
@@ -1391,6 +1928,8 @@ sendVoiceCallBtn.addEventListener("click", async () => {
       uiStatus("Voice call started.", "Calls are in progress via Twilio.", "ok");
       sendVoiceCallBtn.style.display = "none";
       voiceCallDraft.value = "";
+      latestDispatchAttachments = [];
+      setDraftAttachmentBadge("voice", 0);
       latestVoiceCallContactId = "";
       forcedActionChoice = "";
     } else {
@@ -1422,12 +1961,14 @@ sendEmailBtn.addEventListener("click", async () => {
       mode: "general_mail",
       draftedMessage: `${subject}\n\n${body}`,
       subject,
-      body
+      body,
+      attachments: latestDispatchAttachments
     });
     if (out.dispatched?.sent) {
       addMsg(`Email sent to ${contactIds.length} selected contact(s) from your Gmail.`, "bot");
       uiStatus("Email sent.", "Message delivered from your Gmail account.", "ok");
       sendEmailBtn.style.display = "none";
+      latestDispatchAttachments = [];
     } else {
       addMsg(`Email send failed: ${out.dispatched?.reason || "Unknown error"}`, "alert");
       uiStatus("Email send failed.", out.dispatched?.reason || "Unknown error", "error");
@@ -1477,6 +2018,7 @@ cancelMeetBtn.addEventListener("click", async () => {
 (async function init() {
   const user = await requireSession();
   if (!user) return;
+  currentUserName = String(user?.name || "You");
   resetChatSnapshot();
   if (modeSelect) {
     modeSelect.value = "support_chat";
@@ -1489,13 +2031,40 @@ cancelMeetBtn.addEventListener("click", async () => {
   }
   setupDraftTabs();
   setupCopyButtons();
+  initSelectionReferenceUi();
   addMsg(`Hi ${user.name}, I am here to support you.`, "bot");
   try {
     uiStatus("Loading chat page...", "Fetching contacts.");
     await Promise.all([loadContacts(), loadDiscordChannels(), loadHistory()]);
     renderRecipientPickerForMode("support_chat");
+    await pollVoiceCallOverview();
+    if (voiceCallPollTimer) clearInterval(voiceCallPollTimer);
+    voiceCallPollTimer = setInterval(pollVoiceCallOverview, 1600);
     uiStatus("Chat ready.", "You can start messaging.", "ok");
   } catch (err) {
     uiStatus("Chat initialization failed.", err.message, "error");
   }
 })();
+
+window.addEventListener("beforeunload", () => {
+  if (voiceCallPollTimer) clearInterval(voiceCallPollTimer);
+});
+
+if (clearCallIntelBtn) {
+  clearCallIntelBtn.addEventListener("click", async () => {
+    try {
+      const ok = window.confirm("Are you sure you want to delete all call intelligence logs? This cannot be undone.");
+      if (!ok) {
+        uiStatus("Deletion cancelled.", "Call intelligence logs were not removed.", "info");
+        return;
+      }
+      uiStatus("Deleting call intelligence logs...", "Removing logs from UI and backend.");
+      const out = await api("/api/chat/voice-calls/logs", { method: "DELETE" });
+      if (!out?.ok) throw new Error("Failed to delete call logs.");
+      callIntelBox.innerHTML = '<p class="muted">No call logs yet. New AI voice-agent logs will appear after completed calls.</p>';
+      uiStatus("Call intelligence logs deleted.", `Deleted ${Number(out.deletedCount || 0)} log(s).`, "ok");
+    } catch (err) {
+      uiStatus("Delete failed.", err?.message || "Unable to delete call logs.", "error");
+    }
+  });
+}
