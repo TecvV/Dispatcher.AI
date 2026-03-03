@@ -18,6 +18,8 @@ import { emitGlobal, emitToChat, emitToUsers } from "../realtime/hub.js";
 
 const router = Router();
 router.use(requireAuth);
+const ESCALATION_SESSION_DURATION_MS = 30 * 60 * 1000;
+const PREMIUM_MIN_RATED_SESSIONS = 10;
 
 function clampRating(v) {
   const n = Number(v);
@@ -179,7 +181,7 @@ async function recomputeListenerPremiumEligibility(listenerUserId) {
   const avg = count
     ? Number((rated.reduce((a, r) => a + Number(r.speakerSessionRating || 0), 0) / count).toFixed(2))
     : 0;
-  const premiumEligible = count >= 2 && avg >= 7;
+  const premiumEligible = count >= PREMIUM_MIN_RATED_SESSIONS && avg >= 7;
   await EscalationListener.findOneAndUpdate(
     { userId: listenerUserId },
     {
@@ -270,7 +272,7 @@ function canAccessChatSession(session, booking, userId) {
   const isSpeaker = String(booking.speakerUserId) === String(userId);
   const isListener = String(booking.listenerUserId) === String(userId);
   if (!isSpeaker && !isListener) return { ok: false, reason: "Not a participant." };
-  const sessionEndAt = new Date(new Date(session.scheduledAt).getTime() + 60 * 1000);
+  const sessionEndAt = new Date(new Date(session.scheduledAt).getTime() + ESCALATION_SESSION_DURATION_MS);
   if (session.speakerPurgedAt) return { ok: false, reason: "Chat was purged by speaker." };
   if (session.status === "scheduled" && new Date() < new Date(session.scheduledAt)) {
     return { ok: false, reason: "Chat becomes active at scheduled time." };
@@ -368,7 +370,7 @@ async function resolveChatSettlementMode(booking) {
 async function autoCompleteChatIfExpired(booking, chat) {
   if (!booking || !chat || String(booking.mode) !== "chat") return;
   if (chat.status === "ended" || chat.status === "purged") return;
-  const sessionEndAt = new Date(new Date(chat.scheduledAt).getTime() + 60 * 1000);
+  const sessionEndAt = new Date(new Date(chat.scheduledAt).getTime() + ESCALATION_SESSION_DURATION_MS);
   if (new Date() < sessionEndAt) return;
 
   const retentionExpiry = new Date(Date.now() + 48 * 60 * 60 * 1000);
@@ -633,7 +635,9 @@ router.post("/slots/open", async (req, res, next) => {
     if (Number.isNaN(startAt.getTime())) return res.status(400).json({ error: "Invalid date/time." });
     if (startAt <= new Date()) return res.status(400).json({ error: "Open a future slot only." });
     const safeFeeInr = Math.max(0, Number(feeInr || 0));
-    const premiumEligibleNow = Number(listener.totalRatedSessions || 0) >= 2 && Number(listener.averageSatisfaction || 0) >= 7;
+    const premiumEligibleNow =
+      Number(listener.totalRatedSessions || 0) >= PREMIUM_MIN_RATED_SESSIONS &&
+      Number(listener.averageSatisfaction || 0) >= 7;
     if (safeFeeInr > 0 && !premiumEligibleNow) {
       if (listener.walletUnlocked) {
         listener.walletUnlocked = false;
@@ -641,7 +645,7 @@ router.post("/slots/open", async (req, res, next) => {
       }
       return res.status(400).json({
         error:
-          "Premium charging is not enabled yet. Requirement: at least 2 rated sessions with overall average rating >= 7."
+          `Premium charging is not enabled yet. Requirement: at least ${PREMIUM_MIN_RATED_SESSIONS} rated sessions with overall average rating >= 7.`
       });
     }
 
@@ -922,7 +926,7 @@ router.post("/booking/respond", async (req, res, next) => {
       if (host?.integrations?.googleCalendar?.accessToken) {
         const accessToken = await getValidGoogleAccessToken(host);
         const startAt = booking.scheduledAt;
-        const endAt = new Date(new Date(startAt).getTime() + 1 * 60 * 1000);
+        const endAt = new Date(new Date(startAt).getTime() + ESCALATION_SESSION_DURATION_MS);
         const event = await createGoogleMeetAtDateTime({
           accessToken,
           calendarId: host.integrations?.googleCalendar?.calendarId || "primary",
@@ -1272,10 +1276,12 @@ router.post("/session/start", async (req, res, next) => {
     if (!listenerId) return res.status(400).json({ error: "listenerId is required." });
     const listener = await EscalationListener.findOne({ _id: listenerId, active: true });
     if (!listener) return res.status(404).json({ error: "Listener not found or inactive." });
-    const premiumEligible = Number(listener.totalRatedSessions || 0) >= 2 && Number(listener.averageSatisfaction || 0) >= 7;
+    const premiumEligible =
+      Number(listener.totalRatedSessions || 0) >= PREMIUM_MIN_RATED_SESSIONS &&
+      Number(listener.averageSatisfaction || 0) >= 7;
     if (mode === "paid" && !premiumEligible) {
       return res.status(400).json({
-        error: "This listener is not premium-eligible yet. Requirement: at least 2 rated sessions and average rating >= 7."
+        error: `This listener is not premium-eligible yet. Requirement: at least ${PREMIUM_MIN_RATED_SESSIONS} rated sessions and average rating >= 7.`
       });
     }
 

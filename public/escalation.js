@@ -78,6 +78,7 @@ let chatBookingMap = new Map();
 let selectedSlotId = "";
 let selectedSlot = null;
 let pendingRatingBookingId = "";
+const ESCALATION_SESSION_DURATION_MS = 30 * 60 * 1000;
 let ws = null;
 let wsReconnectTimer = null;
 let activeChatSubscription = "";
@@ -1510,7 +1511,7 @@ function startChatCountdown(chat, bookingId) {
 
   const startAt = new Date(chat.scheduledAt).getTime();
   if (!Number.isFinite(startAt)) return;
-  const endAt = startAt + 60 * 1000;
+  const endAt = startAt + ESCALATION_SESSION_DURATION_MS;
 
   const tick = () => {
     const now = Date.now();
@@ -1557,7 +1558,7 @@ function startMeetCountdown() {
     meetSessionStatus.textContent = "No active Google Meet session.";
     return;
   }
-  const endAt = startAt + 60 * 1000;
+  const endAt = startAt + ESCALATION_SESSION_DURATION_MS;
 
   const tick = () => {
     const now = Date.now();
