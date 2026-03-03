@@ -81,3 +81,7 @@ export function createApp() {
 
   return app;
 }
+
+// Vercel Serverless entry expects a default export handler.
+const app = createApp();
+export default app;
