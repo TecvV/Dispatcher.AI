@@ -3,6 +3,7 @@ import express from "express";
 import mongoose from "mongoose";
 import path from "path";
 import { fileURLToPath } from "url";
+import { connectMongo } from "./db/mongo.js";
 import authRoutes from "./routes/auth.js";
 import oauthRoutes from "./routes/oauth.js";
 import chatRoutes from "./routes/chat.js";
@@ -14,6 +15,18 @@ import escalationRoutes from "./routes/escalation.js";
 import agentRoutes from "./routes/agent.js";
 import voiceRoutes from "./routes/voice.js";
 
+let mongoInitPromise = null;
+async function ensureMongoConnected() {
+  if (mongoose.connection.readyState === 1) return;
+  if (!mongoInitPromise) {
+    mongoInitPromise = connectMongo().catch((err) => {
+      mongoInitPromise = null;
+      throw err;
+    });
+  }
+  await mongoInitPromise;
+}
+
 export function createApp() {
   const app = express();
   const __filename = fileURLToPath(import.meta.url);
@@ -24,6 +37,17 @@ export function createApp() {
   app.use(express.json({ limit: "20mb" }));
   app.use(express.urlencoded({ extended: false, limit: "20mb" }));
   app.use(express.static(publicDir, { index: false }));
+
+  // In serverless (Vercel), src/server.js is not executed.
+  // Ensure Mongo is initialized once before any /api handler runs.
+  app.use("/api", async (req, res, next) => {
+    try {
+      await ensureMongoConnected();
+      return next();
+    } catch (err) {
+      return next(err);
+    }
+  });
 
   app.get("/health", (req, res) => {
     const states = ["disconnected", "connected", "connecting", "disconnecting"];
